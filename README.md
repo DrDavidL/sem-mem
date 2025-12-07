@@ -8,6 +8,32 @@
 - **Domain-specific agents** (medical education, legal education, research) that need durable semantic memory
 - **Developers wanting local control** over memory vs. remote vector databases
 
+## Why Not Just Use a Hosted Vector DB?
+
+You absolutely can (and should) use hosted vector databases for many workloads. Sem-Mem is for a different, narrower use case:
+
+**When a hosted DB is great:**
+
+- Large, multi-tenant applications
+- High write concurrency from many clients
+- Complex query patterns (filters, aggregations, hybrid search)
+- Strict SLOs, replication, managed backups, etc.
+
+**When Sem-Mem is a better fit:**
+
+- **Personal or small-team assistants** where memory lives “with” the agent
+- **Local-first workflows** where you don’t want another remote dependency
+- **Lightweight deployment**: one Python process, no external services
+- **Tight latency loops**: L1 cache + local HNSW is extremely fast for KNN
+
+Sem-Mem’s design trades:
+
+- **Horizontal scalability** and **multi-tenant complexity**
+- for
+- **Simplicity**, **local control**, and **low operational overhead**.
+
+If you already run Postgres/pgvector, Qdrant, Pinecone, etc. and are happy with that, you may not need Sem-Mem. If you just want your agent to *remember things* without standing up new infra, Sem-Mem is likely a better fit.
+
 ## How It Works
 
 ```
@@ -36,6 +62,54 @@
 │  │ + Optional web search                                      │
 └─────────────────────────────────────────────────────────────┘
 ```
+## Design Choices
+
+Sem-Mem makes a few deliberate trade-offs:
+
+### 1. Tiered Memory (L1 + L2)
+
+- **L1 (SmartCache, RAM):** Segmented LRU with "Protected" and "Probation" tiers.
+  - Recently / frequently accessed items stay hot.
+  - Misses fall back to L2.
+- **L2 (HNSW, Disk):** Persistent approximate nearest neighbor index.
+  - All long-term memories live here.
+  - Hits are promoted back into L1.
+
+This mirrors how you probably want an assistant to behave: **fast recall for what’s active**, with the ability to rediscover older but relevant memories when needed.
+
+### 2. Local Disk Instead of a Remote DB
+
+- Uses a **local directory** (`MEMORY_STORAGE_DIR`) to store:
+  - HNSW index files
+  - Instructions file
+- No separate DB service to deploy or manage.
+- Fits well for:
+  - Single-user setups
+  - Small internal tools
+  - Prototyping and research agents
+
+You still send text to OpenAI for embeddings and chat, but **the semantic index itself stays on your machine**.
+
+### 3. HNSW for Approximate Nearest Neighbor
+
+- **Why HNSW?**
+  - Excellent recall/latency trade-off for typical agent-sized memory (10³–10⁶ vectors).
+  - Mature, well-tested implementation (`hnswlib`).
+- Tuned with:
+  - `M=16`, `ef_construction=200` by default (configurable in code).
+
+The goal isn’t to be a general-purpose vector database, but a **fast, embeddable memory index** that feels “instant” in practice.
+
+### 4. Memory-Aware Agent Abstractions
+
+- `MemoryChat` and `@with_memory` / `@with_rag` decorators encapsulate:
+  - Retrieval
+  - Instruction injection
+  - Optional web search
+  - Auto-memory (salience detection)
+
+Instead of wiring RAG + instructions + memory heuristics yourself every time, you call one object or wrap one function. Sem-Mem tries to be **just enough structure** to be useful, without locking you into a full agent framework.
+
 
 ## 90-Second Quickstart
 
@@ -75,7 +149,7 @@ response, _, retrieved, _ = memory.chat_with_memory(
 
 * **Zero-Latency "Hot" Recall:** Uses a Segmented LRU cache to keep relevant context in RAM.
 * **Local Storage:** Your memory index (HNSW) and instructions stay on your machine—not in a cloud database. Note: Text is still sent to OpenAI for embeddings and chat responses.
-* **HNSW Index:** O(log n) approximate nearest neighbor search using hnswlib.
+* **HNSW Index:** Approximate nearest neighbor search with O(log n) using hnswlib.
 * **Query Expansion:** LLM-powered alternative query generation for better recall.
 * **Auto-Memory (Salience Detection):** Automatically saves important exchanges (personal facts, decisions, corrections) without explicit user action.
 * **Web Search:** Optional web search via OpenAI's Responses API (off by default).
@@ -113,6 +187,10 @@ pip install -e ".[all]"
 ### Package Installation
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install -e ".[all]"    # everything for local dev
+
 # Core package only
 pip install sem-mem
 
@@ -428,6 +506,27 @@ ruff check .
 
 <img width="2242" height="1672" alt="CleanShot 2025-12-06 at 18 33 59@2x" src="https://github.com/user-attachments/assets/5a81b41f-d082-4cd5-a4bf-3360c4d7a529" />
 
+## Limitations
+
+Sem-Mem is intentionally small and local. Some things it does **not** try to do:
+
+- **Not a general-purpose vector database.**  
+  No sharding, distributed indexing, replica sets, or advanced filtering/analytics. If you need that, use pgvector, Qdrant, Pinecone, etc.
+
+- **Single-node, local storage only.**  
+  All memory lives in a local directory (`MEMORY_STORAGE_DIR`). There’s no built-in remote persistence, multi-region replication, or cross-node synchronization.
+
+- **Best for 10³–10⁶ memories, not billions.**  
+  HNSW can handle large indexes, but Sem-Mem isn’t tuned for multi‑billion‑vector workloads.
+
+- **Coarse-grained access control.**  
+  The FastAPI server shares one memory instance across clients. There is no built-in per-user auth/namespace isolation yet.
+
+- **Eventual consistency for auto-memory.**  
+  Auto-memory is opportunistic: important facts are distilled and saved, but not every utterance is guaranteed to be captured or perfectly summarized.
+
+- **LLM-dependent behavior.**  
+  Query expansion, auto-memory salience detection, and chat behavior depend on the underlying OpenAI models. Changes in model behavior can change Sem-Mem’s “feel” without any code changes.
 
 ## Technical Details
 
@@ -438,6 +537,48 @@ ruff check .
 - **Cache**: Segmented LRU with Protected/Probation tiers
 - **API**: OpenAI Responses API for stateful conversations
 - **Thread Safety**: RLock synchronization for concurrent access
+
+## Production Notes
+
+Sem-Mem can be used in small production setups, but keep these in mind:
+
+- **Single process = single point of failure.**  
+  The default FastAPI + `SemanticMemory` instance is in-memory for L1 and on local disk for L2. If the process dies, L1 is lost (L2 persists), and you need a restart mechanism (systemd, Docker, Kubernetes, etc.).
+
+- **Concurrency model.**  
+  Thread safety is handled with `RLock`, but:
+  - One Python process still has the GIL.
+  - Very high concurrency (hundreds of RPS) may require:
+    - Multiple worker processes
+    - One shared disk index mounted read/write
+    - Or per-worker copies with a periodic sync strategy
+
+- **Backups and durability.**  
+  The HNSW index and instructions are just files:
+  - Use regular filesystem backups / snapshots if memories are important.
+  - Consider versioning the memory directory for “time travel” or rollback.
+
+- **Latency vs. index size.**  
+  As L2 grows, you may want to:
+  - Tune HNSW parameters (`ef`, `M`) for your workload
+  - Prune or archive very old/low-value memories
+  - Increase RAM if you expect a very large hot-set in L1
+
+- **Per-user isolation (multi-tenant apps).**  
+  For real multi-user production:
+  - Run **separate memory directories per user** (e.g., `./memory/{user_id}`), or
+  - Add a user/tenant dimension at the API layer and instantiate `SemanticMemory` per tenant.
+  - True multi-tenant sharing with fine-grained ACLs is **out of scope** for now.
+
+- **Observability.**  
+  Sem-Mem exposes `/stats` and `/cache` endpoints, but:
+  - You should still add your own logging/tracing around API calls.
+  - In latency-sensitive contexts, measure:
+    - Cache hit rate (L1 vs L2)
+    - HNSW query times
+    - End-to-end request latency
+
+In short: Sem-Mem is great for **local-first assistants, internal tools, and research agents**. If you’re building a large, multi-tenant SaaS with strict SLOs, you’ll likely pair Sem-Mem with more traditional infrastructure (or use a hosted vector DB directly).
 
 ## License
 
