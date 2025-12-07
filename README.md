@@ -1,10 +1,77 @@
 # Sem-Mem: Tiered Semantic Memory for AI Agents
 
-**Sem-Mem** is a semantic memory layer for OpenAI-based agents with **local storage**. It implements a **Tiered Memory** architecture using HNSW (Hierarchical Navigable Small World) indexing for fast approximate nearest-neighbor search with O(log n) complexity.
+> **Drop-in semantic memory for OpenAI agents: local HNSW-backed storage with auto-memory and RAG out of the box.**
 
-It features a **Tiered "Smart Cache"** system (Segmented LRU) that mimics human memory:
-1.  **L1 (Hot/RAM):** Instant access to recently used or high-frequency data (Segmented into "Probation" and "Protected" tiers).
-2.  **L2 (Cold/Disk):** Permanent HNSW index for semantic search across all stored memories.
+## Who It's For
+
+- **Personal assistant builders** who want their bot to remember user details across sessions
+- **Domain-specific agents** (clinical, legal, research) needing local semantic storage
+- **Developers wanting local control** over memory vs. remote vector databases
+
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        User Query                           │
+└─────────────────────────┬───────────────────────────────────┘
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│  L1: SmartCache (RAM)                                       │
+│  ├── Protected tier (frequently accessed)                   │
+│  └── Probation tier (recently accessed)                     │
+│  → HIT: Instant recall, no disk I/O                        │
+└─────────────────────────┬───────────────────────────────────┘
+                          │ MISS
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│  L2: HNSW Index (Disk)                                      │
+│  → O(log n) approximate nearest neighbor search             │
+│  → Results promoted to L1 cache                             │
+└─────────────────────────┬───────────────────────────────────┘
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│  LLM (OpenAI Responses API)                                 │
+│  + Retrieved memories as context                            │
+│  + Persistent instructions                                  │
+│  + Optional web search                                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## 90-Second Quickstart
+
+```python
+from sem_mem import SemanticMemory
+from sem_mem.decorators import MemoryChat
+
+memory = SemanticMemory(api_key="sk-...")
+chat = MemoryChat(memory)
+
+# The "aha" moment: it remembers you
+print(chat.send("My name is Sam, I'm a cardiology fellow in Boston."))
+# → "Nice to meet you, Sam! Cardiology is a rewarding field..."
+
+print(chat.send("Where do I live and what do I do?"))
+# → "You're a cardiology fellow in Boston."
+
+# Explicit memory storage
+chat.remember("Patient prefers morning appointments")
+```
+
+### Clinical Example
+
+```python
+# Store clinical facts
+memory.remember("Patient is allergic to penicillin")
+memory.remember("Patient takes metoprolol 25mg daily")
+
+# Later, in a different session...
+response, _, retrieved, _ = memory.chat_with_memory(
+    "What should I check before prescribing antibiotics?"
+)
+# Retrieved: ["Patient is allergic to penicillin"]
+# Response: "Before prescribing, note that this patient has a documented
+#            penicillin allergy. Consider alternatives like azithromycin..."
+```
 
 ## Features
 
@@ -13,7 +80,7 @@ It features a **Tiered "Smart Cache"** system (Segmented LRU) that mimics human 
 * **HNSW Index:** O(log n) approximate nearest neighbor search using hnswlib.
 * **Query Expansion:** LLM-powered alternative query generation for better recall.
 * **Auto-Memory (Salience Detection):** Automatically saves important exchanges (personal facts, decisions, corrections) without explicit user action.
-* **Web Search:** Built-in web search via OpenAI's Responses API for real-time information.
+* **Web Search:** Optional web search via OpenAI's Responses API (off by default).
 * **Memory-Aware Context:** The model understands it has semantic memory and can help users manage it.
 * **Thread-Safe:** Concurrent access support with RLock synchronization.
 * **Model Selection:** Support for reasoning models (gpt-5.1, o1, o3) with configurable reasoning effort.
@@ -27,7 +94,7 @@ It features a **Tiered "Smart Cache"** system (Segmented LRU) that mimics human 
 ### From Source (Development)
 
 ```bash
-git clone https://github.com/david/sem-mem.git
+git clone https://github.com/DrDavidL/sem-mem.git
 cd sem-mem
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
@@ -194,14 +261,18 @@ response, resp_id, mems, logs = memory.chat_with_memory(
 
 ## Model Selection
 
-Sem-Mem supports OpenAI's latest models:
+Sem-Mem supports OpenAI models via the `chat_model` parameter:
 
 | Model | Type | Features |
 |-------|------|----------|
-| `gpt-5.1` | Reasoning (default) | Extended thinking, `reasoning_effort` parameter |
-| `gpt-4.1` | Standard | Temperature control, faster responses |
+| `o3` | Reasoning | Extended thinking, `reasoning_effort` parameter |
+| `o1` | Reasoning | Extended thinking, `reasoning_effort` parameter |
+| `gpt-4o` | Standard | Temperature control, faster responses |
+| `gpt-4.1` | Standard | Temperature control, optimized for code |
 
-### Reasoning Effort (for gpt-5.1, o1, o3)
+> **Note**: The codebase uses `gpt-5.1` as a placeholder for reasoning models. Pass any valid OpenAI model string (e.g., `o3`, `o1`, `gpt-4o`) via `chat_model`.
+
+### Reasoning Effort (for o1, o3, and other reasoning models)
 
 - **low**: Quick responses, minimal reasoning
 - **medium**: Balanced reasoning depth
@@ -209,13 +280,15 @@ Sem-Mem supports OpenAI's latest models:
 
 Change models via:
 - **UI**: Sidebar model selector
-- **API**: `PUT /model?model=gpt-4.1`
-- **Config**: `CHAT_MODEL=gpt-4.1` in `.env`
-- **Code**: `SemanticMemory(chat_model="gpt-4.1")`
+- **API**: `PUT /model?model=gpt-4o`
+- **Config**: `CHAT_MODEL=o3` in `.env`
+- **Code**: `SemanticMemory(chat_model="o3")`
 
 ## Web Search
 
-Sem-Mem integrates OpenAI's built-in web search tool for real-time information retrieval.
+Sem-Mem optionally integrates OpenAI's built-in web search tool for real-time information retrieval. **Web search is off by default.**
+
+> **Clarification**: "Local storage" refers to your HNSW index and instructions file staying on your machine. When web search is enabled, queries are sent to OpenAI's web search API (in addition to the normal embedding/chat API calls).
 
 Enable via:
 - **UI**: Toggle "🌐 Web Search" in the sidebar
@@ -343,7 +416,7 @@ print(f"Migrated {count} memories to HNSW index")
 
 ```bash
 # Setup
-git clone https://github.com/david/sem-mem.git
+git clone https://github.com/DrDavidL/sem-mem.git
 cd sem-mem
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[all]"
