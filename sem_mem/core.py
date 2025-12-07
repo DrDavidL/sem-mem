@@ -27,17 +27,64 @@ When you see retrieved context:
 You can help the user manage their memory by suggesting they use:
 - "remember: <fact>" to explicitly save important information
 - "instruct: <guideline>" to add persistent behavioral instructions
-"""
+
+{file_access_context}"""
+
+# File access context template (included when files are whitelisted)
+_FILE_ACCESS_CONTEXT_TEMPLATE = """
+File Access:
+You have access to whitelisted files from the codebase. When files are available:
+- **Available Files**: Listed below with path, size, and type (text/pdf/word)
+- You can reference file contents when discussing code, documentation, or project details
+- Use this knowledge to give accurate, context-aware answers about the project
+
+{file_list}"""
 
 
-def get_memory_system_context() -> str:
-    """Get the memory system context with current date/time."""
+def get_memory_system_context(include_files: bool = False) -> str:
+    """Get the memory system context with current date/time.
+
+    Args:
+        include_files: If True, include whitelisted file list in context
+
+    Returns:
+        System context string for the agent
+    """
     now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-    return _MEMORY_SYSTEM_CONTEXT_TEMPLATE.format(datetime=now)
+
+    file_access_context = ""
+    if include_files:
+        try:
+            from .file_access import load_whitelist, get_file_info
+            allowed = load_whitelist()
+            if allowed:
+                files = get_file_info(allowed)
+                if files:
+                    # Format file list compactly
+                    file_lines = []
+                    for f in files[:100]:  # Limit to first 100 files
+                        size_kb = f["size"] / 1024
+                        file_lines.append(f"  - {f['path']} ({size_kb:.1f}KB, {f['content_type']})")
+
+                    file_list = "\n".join(file_lines)
+                    if len(files) > 100:
+                        file_list += f"\n  ... and {len(files) - 100} more files"
+
+                    file_access_context = _FILE_ACCESS_CONTEXT_TEMPLATE.format(file_list=file_list)
+        except ImportError:
+            pass  # file_access module not available
+
+    return _MEMORY_SYSTEM_CONTEXT_TEMPLATE.format(
+        datetime=now,
+        file_access_context=file_access_context
+    )
 
 
 # For backwards compatibility, provide a static version (without timestamp)
-MEMORY_SYSTEM_CONTEXT = _MEMORY_SYSTEM_CONTEXT_TEMPLATE.format(datetime="(timestamp not available)")
+MEMORY_SYSTEM_CONTEXT = _MEMORY_SYSTEM_CONTEXT_TEMPLATE.format(
+    datetime="(timestamp not available)",
+    file_access_context=""
+)
 
 
 class SmartCache:
@@ -166,6 +213,7 @@ class SemanticMemory:
         auto_memory: bool = True,
         auto_memory_threshold: float = 0.5,
         include_memory_context: bool = True,
+        include_file_access: bool = False,
         web_search: bool = False,
     ):
         self.client = OpenAI(api_key=api_key)
@@ -178,6 +226,7 @@ class SemanticMemory:
         self.auto_memory_enabled = auto_memory
         self.auto_memory_threshold = auto_memory_threshold
         self.include_memory_context = include_memory_context
+        self.include_file_access = include_file_access
         self.web_search_enabled = web_search
 
         # Segmented LRU cache for hot items (L1)
@@ -248,10 +297,30 @@ class SemanticMemory:
             return [query]
 
     def load_instructions(self) -> str:
-        """Load instructions from file."""
+        """Load user instructions from file.
+
+        If no instructions file exists, copies from instructions.example.txt
+        if available in the project root.
+
+        Note: This returns only user-defined instructions. System context
+        (memory capabilities, file access, timestamps) is added separately
+        in chat_with_memory() and is not user-editable.
+        """
         if os.path.exists(self.instructions_file):
             with open(self.instructions_file, 'r') as f:
                 return f.read()
+
+        # Try to copy from example file on first run
+        example_file = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "instructions.example.txt"
+        )
+        if os.path.exists(example_file):
+            import shutil
+            shutil.copy(example_file, self.instructions_file)
+            with open(self.instructions_file, 'r') as f:
+                return f.read()
+
         return ""
 
     def save_instructions(self, text: str):
@@ -328,6 +397,13 @@ class SemanticMemory:
             limit: Maximum number of results to return
             threshold: Minimum similarity score (0-1)
             expand_query: If True, use LLM to generate alternative query phrasings
+
+        Returns:
+            Tuple of (memories, logs) where memories are formatted for display.
+            Corrections are placed last so the model sees them as most recent.
+
+        Invariant: if both an older fact and a newer correction are retrieved,
+        the model should see the correction after the older fact, treating it as overriding.
         """
         logs = []
 
@@ -368,7 +444,8 @@ class SemanticMemory:
             # Auto-persist frequently accessed items to L2
             self._persist_hot_items()
 
-            return [x[1]['text'] for x in l1_hits[:limit]], logs
+            raw_memories = [x[1]['text'] for x in l1_hits[:limit]]
+            return self._format_memories_for_display(raw_memories), logs
 
         # --- TIER 2: Search HNSW Index ---
         logs.append("🔍 L1 Miss... Searching HNSW index...")
@@ -395,7 +472,39 @@ class SemanticMemory:
         if promoted:
             logs.append(f"🔼 Promoted {promoted} to Probation.")
 
-        return [item['text'] for _, item in top_results], logs
+        raw_memories = [item['text'] for _, item in top_results]
+        return self._format_memories_for_display(raw_memories), logs
+
+    def _format_memories_for_display(self, memories: List[str]) -> List[str]:
+        """
+        Format memories for display, parsing structured memories and
+        ordering so corrections appear last (most recent).
+
+        Args:
+            memories: List of raw memory strings (may be JSON-structured or plain text)
+
+        Returns:
+            List of formatted memory strings, with corrections at the end
+        """
+        from .auto_memory import parse_structured_memory, MEMORY_KIND_CORRECTION
+
+        regular_memories = []
+        corrections = []
+
+        for mem in memories:
+            text, metadata = parse_structured_memory(mem)
+            kind = metadata.get("kind", "fact")
+
+            # Format with kind prefix for clarity when it's a special type
+            if kind == MEMORY_KIND_CORRECTION:
+                corrections.append(f"[CORRECTION] {text}")
+            elif kind in ("identity", "preference", "decision"):
+                regular_memories.append(text)
+            else:
+                regular_memories.append(text)
+
+        # Return regular memories first, then corrections (so model sees corrections last)
+        return regular_memories + corrections
 
     def bulk_learn_pdf(self, pdf_file, chunk_size=500):
         """Reads PDF, chunks it, and saves to L2."""
@@ -529,7 +638,8 @@ class SemanticMemory:
         # Build instructions: memory context (with current timestamp) + user instructions
         user_instructions = self.load_instructions() or "You are a helpful assistant."
         if self.include_memory_context:
-            instructions = f"{get_memory_system_context()}\n\n{user_instructions}"
+            system_context = get_memory_system_context(include_files=self.include_file_access)
+            instructions = f"{system_context}\n\n{user_instructions}"
         else:
             instructions = user_instructions
 
@@ -577,11 +687,22 @@ class SemanticMemory:
         if should_auto_remember and self.auto_memory:
             signal = self.auto_memory.evaluate(user_query, response_text)
             if signal.should_remember and signal.memory_text:
-                self.remember(signal.memory_text, metadata={
+                # Use structured memory format for better retrieval handling
+                from .auto_memory import format_structured_memory
+                structured_memory = format_structured_memory(
+                    text=signal.memory_text,
+                    kind=signal.kind,
+                    meta={
+                        "source": "auto_memory",
+                        "salience": signal.salience,
+                        "reason": signal.reason,
+                    }
+                )
+                self.remember(structured_memory, metadata={
                     "source": "auto_memory",
+                    "kind": signal.kind,
                     "salience": signal.salience,
-                    "reason": signal.reason,
                 })
-                logs.append(f"💾 Auto-saved: {signal.reason} (salience: {signal.salience:.2f})")
+                logs.append(f"💾 Auto-saved ({signal.kind}): {signal.reason} (salience: {signal.salience:.2f})")
 
         return response_text, response.id, memories, logs

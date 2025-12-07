@@ -1,0 +1,21 @@
+# Files and folders Sema (Semantic Memory Agent) can access
+# One path per line, relative to repo root
+# Directories end with / and include all files recursively
+
+# Core library
+sem_mem/
+
+# Main apps
+app.py
+app_api.py
+server.py
+
+# Documentation
+README.md
+CLAUDE.md
+
+# Configuration
+pyproject.toml
+.env.example
+
+/

@@ -401,7 +401,9 @@ API documentation available at `http://localhost:8000/docs` when server is runni
 │   ├── config.py            # Configuration and secret loading
 │   ├── vector_index.py      # HNSWIndex for L2 storage
 │   ├── decorators.py        # @with_memory, @with_rag, MemoryChat
-│   └── auto_memory.py       # AutoMemory salience detection
+│   ├── auto_memory.py       # AutoMemory salience detection
+│   └── thread_utils.py      # Thread utilities (title generation, summarization)
+├── tests/                   # Unit tests
 ├── local_memory/            # HNSW index files + instructions.txt
 ├── app.py                   # Streamlit standalone app
 ├── app_api.py               # Streamlit API client app
@@ -410,6 +412,162 @@ API documentation available at `http://localhost:8000/docs` when server is runni
 ├── docker-compose.yml
 ├── pyproject.toml
 └── README.md
+```
+
+## Thread Management
+
+Sem-Mem provides optional thread utilities that UIs can use to enhance conversation management. The thread model is **intentionally UI-layer**, not baked into core classes like `MemoryChat`.
+
+### Auto-Rename Threads
+
+Threads are automatically given descriptive titles after enough context accumulates:
+
+```python
+from sem_mem import generate_thread_title
+
+messages = [
+    {"role": "user", "content": "How do I configure nginx for SSL?"},
+    {"role": "assistant", "content": "Here's how to set up SSL..."},
+    {"role": "user", "content": "What about certificate renewal?"},
+    {"role": "assistant", "content": "For automatic renewal, use certbot..."},
+]
+
+title = generate_thread_title(messages)  # "Nginx SSL Configuration and Renewal"
+```
+
+**Configuration** (in `sem_mem/config.py` or environment):
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `AUTO_THREAD_RENAME_ENABLED` | `True` | Enable auto-rename feature |
+| `AUTO_THREAD_RENAME_MIN_USER_MESSAGES` | `3` | Minimum user messages before renaming |
+| `AUTO_THREAD_RENAME_MODEL` | `gpt-4.1-mini` | Model for title generation |
+| `AUTO_THREAD_RENAME_MAX_WORDS` | `8` | Maximum words in title |
+
+### Conversation Summaries (Windowed)
+
+Long conversations are automatically summarized into "chapters" stored in L2. This creates durable semantic history focusing on:
+- Key decisions and conclusions
+- User preferences and constraints
+- Corrections and clarifications
+- Important background context
+
+```python
+from sem_mem import estimate_message_tokens, select_summary_window, summarize_conversation_window
+
+messages = thread["messages"]
+windows = thread.get("summary_windows", [])
+
+# Check if summarization is needed
+if estimate_message_tokens(messages) >= 8000:
+    window = select_summary_window(messages, windows, leave_recent=6)
+    if window:
+        start, end = window
+        summary = summarize_conversation_window(messages[start:end], client=memory.client)
+        # Store summary in L2 and track in thread
+```
+
+**Configuration** (in `sem_mem/config.py`):
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `CONVERSATION_SUMMARY_TOKEN_THRESHOLD` | `8000` | Tokens before summarizing |
+| `CONVERSATION_SUMMARY_MIN_MESSAGES` | `10` | Minimum messages to consider |
+| `CONVERSATION_SUMMARY_MODEL` | `gpt-4.1-mini` | Model for summarization |
+| `CONVERSATION_SUMMARY_LEAVE_RECENT` | `6` | Recent messages to keep raw |
+| `CONVERSATION_SUMMARY_MAX_WINDOWS_PER_THREAD` | `10` | Max summaries per thread |
+
+Summaries are stored in L2 with metadata linking them to the source thread and message range, enabling semantic retrieval of historical conversation context.
+
+### Thread Deletion with Farewell Summary
+
+When deleting a thread, you can optionally save a "farewell summary" to L2 memory before removal. This preserves durable takeaways (decisions, preferences, important context) even after the thread is gone.
+
+```python
+from sem_mem import summarize_deleted_thread
+
+messages = thread["messages"]
+summary = summarize_deleted_thread(messages, client=memory.client)
+if summary:
+    memory.remember(summary, metadata={"type": "farewell_summary", "thread_name": name})
+```
+
+**Configuration** (in `sem_mem/config.py`):
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `ON_DELETE_THREAD_BEHAVIOR` | `"prompt"` | `"prompt"`, `"always_save"`, or `"never_save"` |
+| `FAREWELL_SUMMARY_MODEL` | `gpt-4.1-mini` | Model for farewell summarization |
+| `FAREWELL_SUMMARY_MAX_CHARS` | `8000` | Max chars of conversation to include |
+
+**Behavior options:**
+- `"prompt"`: Ask user whether to save summary before deleting (default)
+- `"always_save"`: Always generate and save farewell summary
+- `"never_save"`: Delete immediately without summarization
+
+The farewell summary focuses on the same durable information as windowed summaries: key decisions, user preferences, corrections, and important context.
+
+### Thread Data Structure (UI Layer)
+
+The Streamlit app uses this structure for threads:
+
+```python
+{
+    "messages": [],              # List of {role, content} dicts
+    "response_id": None,         # OpenAI Responses API ID for continuity
+    "title": "New conversation", # Display title
+    "title_user_overridden": False,  # If True, auto-rename won't touch it
+    "summary_windows": [         # Summaries of earlier conversation segments
+        {
+            "start_index": 0,
+            "end_index": 24,
+            "summary_text": "...",
+            "summary_id": "...",   # L2 memory ID
+            "timestamp": "...",
+        }
+    ],
+}
+```
+
+**Why threads live in the UI layer:**
+- Different surfaces (Streamlit, FastAPI, CLI) can define their own thread models
+- `MemoryChat` stays simple: just `messages` + `previous_response_id`
+- Thread utilities are pure functions that any UI can call
+
+### Building Your Own Thread UI
+
+If you're building a custom frontend:
+
+```python
+from sem_mem import SemanticMemory, generate_thread_title
+from sem_mem.config import AUTO_THREAD_RENAME_MIN_USER_MESSAGES
+
+memory = SemanticMemory(api_key="...")
+
+# Your thread storage (DB, session state, etc.)
+thread = {
+    "messages": [],
+    "response_id": None,
+    "title": "New conversation",
+    "title_user_overridden": False,
+}
+
+# After each chat turn
+response, resp_id, mems, logs = memory.chat_with_memory(
+    user_input, previous_response_id=thread["response_id"]
+)
+thread["response_id"] = resp_id
+thread["messages"].append({"role": "user", "content": user_input})
+thread["messages"].append({"role": "assistant", "content": response})
+
+# Auto-rename check
+user_count = sum(1 for m in thread["messages"] if m["role"] == "user")
+if (
+    not thread["title_user_overridden"]
+    and thread["title"] == "New conversation"
+    and user_count >= AUTO_THREAD_RENAME_MIN_USER_MESSAGES
+):
+    thread["title"] = generate_thread_title(thread["messages"], client=memory.client)
 ```
 
 ## Memory Systems
@@ -445,6 +603,45 @@ memory = SemanticMemory(api_key="...", auto_memory=False)
 
 # Disable per-call
 response = memory.chat_with_memory(query, auto_remember=False)
+```
+
+### Memory Policy
+
+Sema uses a policy-based approach to decide what to remember:
+
+**Prioritized for storage:**
+- Stable identity facts (roles, background, long-term projects)
+- Explicit preferences ("I prefer concise answers", "Please always...")
+- Decisions and plans agreed on together
+- Corrections and updates to previous information
+
+**Treated cautiously:**
+- Momentary moods or transient states
+- Sensitive details (unless explicitly requested)
+- Routine Q&A without durable value
+
+**Correction handling:**
+When a user corrects or updates something, the new information overrides the old:
+- Corrections are tagged with `kind: "correction"` in metadata
+- On retrieval, corrections appear last in the context (so the model sees them as most recent)
+- The model is instructed to treat corrections as overriding older facts
+
+```python
+# Auto-detected corrections get special treatment
+"Actually, I changed my mind about the architecture..."  # Tagged as correction
+"No, that's not right - it should be..."                 # Tagged as correction
+"I prefer X going forward..."                            # Tagged as preference
+```
+
+**Structured memory format:**
+Auto-saved memories include metadata for smarter retrieval:
+```json
+{
+  "kind": "correction",
+  "text": "Actually, I prefer dark mode",
+  "timestamp": "2025-01-15T10:30:00",
+  "meta": {"source": "auto_memory", "salience": 0.85}
+}
 ```
 
 ### Multi-Session Behavior

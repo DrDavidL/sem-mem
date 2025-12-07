@@ -32,6 +32,28 @@ REASONING_EFFORTS = ["low", "medium", "high"]
 # Query expansion model - use a fast/cheap model for reformulating queries
 QUERY_EXPANSION_MODEL = "gpt-4.1-mini"
 
+# --- Auto Thread Rename ---
+# Automatically generate descriptive titles for conversation threads
+AUTO_THREAD_RENAME_ENABLED = True
+AUTO_THREAD_RENAME_MIN_USER_MESSAGES = 3  # Trigger after N user messages
+AUTO_THREAD_RENAME_MODEL = "gpt-4.1-mini"  # Fast/cheap model for title generation
+AUTO_THREAD_RENAME_MAX_WORDS = 8  # Maximum words in generated title
+
+# --- Conversation Summarization ---
+# Windowed summaries for long conversations, stored in L2 for durable semantic history
+CONVERSATION_SUMMARY_TOKEN_THRESHOLD = 8000  # Approx tokens before summarizing
+CONVERSATION_SUMMARY_MIN_MESSAGES = 10  # Don't summarize tiny threads
+CONVERSATION_SUMMARY_MODEL = "gpt-4.1-mini"  # Cheap but capable summarizer
+CONVERSATION_SUMMARY_MAX_CHARS = 8000  # Safety cap for prompt content
+CONVERSATION_SUMMARY_LEAVE_RECENT = 6  # Raw turns kept after last summary window
+CONVERSATION_SUMMARY_MAX_WINDOWS_PER_THREAD = 10  # Soft guardrail
+
+# --- Thread Deletion ---
+# Behavior when deleting a thread
+ON_DELETE_THREAD_BEHAVIOR = "prompt"  # "prompt", "always_save", or "never_save"
+FAREWELL_SUMMARY_MODEL = "gpt-4.1-mini"  # Model for farewell summaries
+FAREWELL_SUMMARY_MAX_CHARS = 8000  # Safety cap for prompt content
+
 
 def _load_dotenv() -> None:
     """Load .env file if it exists and python-dotenv is available."""

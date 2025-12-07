@@ -3,12 +3,18 @@ Automatic memory consolidation based on salience detection.
 
 Evaluates exchanges and decides what's worth remembering for future conversations.
 Uses a hybrid approach: cheap heuristics first, LLM judge for ambiguous cases.
+
+Memory Policy:
+- Prioritize durable, high-value memories (identity, preferences, decisions)
+- Treat explicit corrections as overriding older facts
+- Tag memories with 'kind' for better retrieval handling
 """
 
 import re
 import json
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from datetime import datetime
+from typing import Optional, List, Tuple, Any
 from openai import OpenAI, AsyncOpenAI
 
 from .config import QUERY_EXPANSION_MODEL
@@ -16,6 +22,13 @@ from .config import QUERY_EXPANSION_MODEL
 
 # Model for salience evaluation (same cheap model as query expansion)
 AUTO_MEMORY_MODEL = QUERY_EXPANSION_MODEL
+
+# Memory kinds for structured storage
+MEMORY_KIND_IDENTITY = "identity"      # Who the user is
+MEMORY_KIND_PREFERENCE = "preference"  # What they prefer
+MEMORY_KIND_DECISION = "decision"      # Decisions made together
+MEMORY_KIND_CORRECTION = "correction"  # Updates/corrections to prior info
+MEMORY_KIND_FACT = "fact"              # General factual information
 
 
 @dataclass
@@ -25,6 +38,7 @@ class MemorySignal:
     memory_text: str  # Distilled/summarized fact to store
     salience: float  # 0-1 importance score
     reason: str  # Why it's worth remembering (for debugging)
+    kind: str = MEMORY_KIND_FACT  # Type of memory for retrieval handling
 
 
 # Heuristic patterns that suggest high salience
@@ -59,6 +73,128 @@ FACTUAL_PATTERNS = [
     r"\bmy\s+\w+\s+is\b",
 ]
 
+# Patterns for explicit preferences (high priority for memory)
+PREFERENCE_PATTERNS = [
+    r"\bi\s+prefer\b",
+    r"\bi\s+like\s+when\b",
+    r"\bi\s+don'?t\s+like\s+when\b",
+    r"\bgoing\s+forward,?\s+please\b",
+    r"\bfrom\s+now\s+on\b",
+    r"\bplease\s+always\b",
+    r"\bplease\s+never\b",
+    r"\bi\s+would\s+prefer\b",
+    r"\bi'?d\s+rather\b",
+    r"\bmy\s+preference\s+is\b",
+]
+
+# Patterns for identity/role statements (high priority for memory)
+IDENTITY_PATTERNS = [
+    r"\bi'?m\s+(a|an)\s+\w+",  # "I'm a physician", "I'm an engineer"
+    r"\bi\s+am\s+(a|an)\s+\w+",
+    r"\bi\s+work\s+(as|in|at|for)\b",
+    r"\bmy\s+(job|role|title|position)\s+(is|as)\b",
+    r"\bi'?ve\s+been\s+(a|an|working)\b",
+    r"\bi\s+specialize\s+in\b",
+    r"\bmy\s+background\s+is\b",
+    r"\bi\s+have\s+\d+\s+(years?|kids?|children)\b",
+    r"\bi'?m\s+married\b",
+    r"\bi\s+live\s+(in|with)\b",
+]
+
+# Patterns for corrections/updates (override older facts)
+CORRECTION_PATTERNS = [
+    r"\bactually,?\b",
+    r"\bi\s+changed\s+my\s+mind\b",
+    r"\bno,?\s+(that'?s?\s+not|earlier\s+i\s+said)\b",
+    r"\blet\s+me\s+correct\b",
+    r"\bi\s+was\s+wrong\b",
+    r"\bthat'?s?\s+not\s+(right|correct|accurate)\b",
+    r"\bi\s+meant\s+to\s+say\b",
+    r"\bforget\s+what\s+i\s+said\b",
+    r"\bignore\s+(my\s+)?previous\b",
+    r"\bupdated?\s+(my\s+)?thinking\b",
+    r"\bon\s+second\s+thought\b",
+    r"\bscratch\s+that\b",
+]
+
+
+def looks_like_preference(text: str) -> bool:
+    """Check if text contains explicit preference statements."""
+    text_lower = text.lower()
+    return any(re.search(p, text_lower, re.IGNORECASE) for p in PREFERENCE_PATTERNS)
+
+
+def looks_like_identity(text: str) -> bool:
+    """Check if text contains identity/role statements."""
+    text_lower = text.lower()
+    return any(re.search(p, text_lower, re.IGNORECASE) for p in IDENTITY_PATTERNS)
+
+
+def looks_like_correction(text: str) -> bool:
+    """Check if text contains correction/update statements."""
+    text_lower = text.lower()
+    return any(re.search(p, text_lower, re.IGNORECASE) for p in CORRECTION_PATTERNS)
+
+
+def detect_memory_kind(text: str) -> Tuple[str, float]:
+    """
+    Detect the kind of memory and a priority boost for salience.
+
+    Returns:
+        Tuple of (memory_kind, salience_boost)
+    """
+    if looks_like_correction(text):
+        return MEMORY_KIND_CORRECTION, 0.4  # Corrections are high priority
+    if looks_like_identity(text):
+        return MEMORY_KIND_IDENTITY, 0.3
+    if looks_like_preference(text):
+        return MEMORY_KIND_PREFERENCE, 0.3
+    return MEMORY_KIND_FACT, 0.0
+
+
+def format_structured_memory(
+    text: str,
+    kind: str = MEMORY_KIND_FACT,
+    meta: Optional[dict] = None
+) -> str:
+    """
+    Format a memory with structured metadata for better retrieval handling.
+
+    Args:
+        text: The memory text to store
+        kind: Type of memory (identity, preference, decision, correction, fact)
+        meta: Optional additional metadata
+
+    Returns:
+        JSON-encoded string with structure for later parsing
+    """
+    payload = {
+        "kind": kind,
+        "text": text,
+        "timestamp": datetime.now().isoformat(),
+    }
+    if meta:
+        payload["meta"] = meta
+    return json.dumps(payload)
+
+
+def parse_structured_memory(memory_str: str) -> Tuple[str, dict]:
+    """
+    Parse a potentially structured memory string.
+
+    Returns:
+        Tuple of (text, metadata) where metadata may include kind, timestamp, etc.
+        If memory is not structured JSON, returns (original_string, {})
+    """
+    try:
+        data = json.loads(memory_str)
+        if isinstance(data, dict) and "text" in data:
+            text = data.pop("text")
+            return text, data
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return memory_str, {}
+
 
 def _count_pattern_matches(text: str, patterns: List[str]) -> int:
     """Count how many patterns match in text."""
@@ -76,15 +212,22 @@ def _has_named_entities(text: str) -> bool:
     return False
 
 
-def compute_quick_salience(user_msg: str, assistant_msg: str) -> float:
+def compute_quick_salience(user_msg: str, assistant_msg: str) -> Tuple[float, str]:
     """
     Compute salience score using cheap heuristics.
 
     Returns:
-        Float 0-1 where higher means more likely worth remembering
+        Tuple of (salience_score, memory_kind) where:
+        - salience_score: Float 0-1, higher means more likely worth remembering
+        - memory_kind: Type of memory detected (identity, preference, correction, fact)
     """
     combined = f"{user_msg} {assistant_msg}"
     score = 0.0
+
+    # First, check for high-priority memory types (preferences, identity, corrections)
+    # These get a significant salience boost and are tagged appropriately
+    memory_kind, kind_boost = detect_memory_kind(user_msg)
+    score += kind_boost
 
     # Explicit markers in user message are strong signals
     explicit_count = _count_pattern_matches(user_msg, EXPLICIT_MARKERS)
@@ -115,7 +258,7 @@ def compute_quick_salience(user_msg: str, assistant_msg: str) -> float:
     if user_msg.strip().endswith('?') and len(assistant_msg) < 100:
         score *= 0.7
 
-    return min(score, 1.0)
+    return min(score, 1.0), memory_kind
 
 
 SALIENCE_EVAL_PROMPT = """Evaluate if this exchange contains information worth saving to long-term memory for future conversations.
@@ -185,10 +328,10 @@ class AutoMemory:
             assistant_msg: The assistant's response
 
         Returns:
-            MemorySignal with evaluation results
+            MemorySignal with evaluation results including memory kind
         """
-        # Quick heuristic check
-        quick_score = compute_quick_salience(user_msg, assistant_msg)
+        # Quick heuristic check - now returns (score, kind)
+        quick_score, memory_kind = compute_quick_salience(user_msg, assistant_msg)
 
         # High confidence - remember without LLM
         if quick_score > 0.8:
@@ -196,7 +339,8 @@ class AutoMemory:
                 should_remember=True,
                 memory_text=self._extract_fact_heuristic(user_msg, assistant_msg),
                 salience=quick_score,
-                reason="High-confidence heuristic match"
+                reason=f"High-confidence heuristic match ({memory_kind})",
+                kind=memory_kind
             )
 
         # Low confidence - skip
@@ -205,11 +349,12 @@ class AutoMemory:
                 should_remember=quick_score >= self.salience_threshold,
                 memory_text="" if quick_score < self.salience_threshold else self._extract_fact_heuristic(user_msg, assistant_msg),
                 salience=quick_score,
-                reason="Low heuristic score" if quick_score < 0.3 else "Heuristic evaluation only"
+                reason="Low heuristic score" if quick_score < 0.3 else "Heuristic evaluation only",
+                kind=memory_kind
             )
 
         # Ambiguous - use LLM judge
-        return self._llm_evaluate(user_msg, assistant_msg, quick_score)
+        return self._llm_evaluate(user_msg, assistant_msg, quick_score, memory_kind)
 
     def _extract_fact_heuristic(self, user_msg: str, assistant_msg: str) -> str:
         """Extract a fact using simple heuristics."""
@@ -226,7 +371,7 @@ class AutoMemory:
 
         return f"Q: {user_msg}\nA: {assistant_msg}"
 
-    def _llm_evaluate(self, user_msg: str, assistant_msg: str, quick_score: float) -> MemorySignal:
+    def _llm_evaluate(self, user_msg: str, assistant_msg: str, quick_score: float, memory_kind: str) -> MemorySignal:
         """Use LLM to evaluate salience."""
         try:
             exchange = f"USER: {user_msg}\n\nASSISTANT: {assistant_msg}"
@@ -249,7 +394,8 @@ class AutoMemory:
                 should_remember=result.get("should_remember", False),
                 memory_text=result.get("memory_text", ""),
                 salience=result.get("salience", quick_score),
-                reason=result.get("reason", "LLM evaluation")
+                reason=result.get("reason", "LLM evaluation"),
+                kind=memory_kind  # Preserve heuristic-detected kind
             )
         except Exception as e:
             # Fallback to heuristic on error
@@ -257,7 +403,8 @@ class AutoMemory:
                 should_remember=quick_score >= self.salience_threshold,
                 memory_text=self._extract_fact_heuristic(user_msg, assistant_msg) if quick_score >= self.salience_threshold else "",
                 salience=quick_score,
-                reason=f"LLM error, using heuristic: {e}"
+                reason=f"LLM error, using heuristic: {e}",
+                kind=memory_kind
             )
 
 
@@ -278,14 +425,15 @@ class AsyncAutoMemory:
 
     async def evaluate(self, user_msg: str, assistant_msg: str) -> MemorySignal:
         """Evaluate whether an exchange should be saved to memory."""
-        quick_score = compute_quick_salience(user_msg, assistant_msg)
+        quick_score, memory_kind = compute_quick_salience(user_msg, assistant_msg)
 
         if quick_score > 0.8:
             return MemorySignal(
                 should_remember=True,
                 memory_text=self._extract_fact_heuristic(user_msg, assistant_msg),
                 salience=quick_score,
-                reason="High-confidence heuristic match"
+                reason=f"High-confidence heuristic match ({memory_kind})",
+                kind=memory_kind
             )
 
         if quick_score < 0.3 or not self.use_llm_judge:
@@ -293,10 +441,11 @@ class AsyncAutoMemory:
                 should_remember=quick_score >= self.salience_threshold,
                 memory_text="" if quick_score < self.salience_threshold else self._extract_fact_heuristic(user_msg, assistant_msg),
                 salience=quick_score,
-                reason="Low heuristic score" if quick_score < 0.3 else "Heuristic evaluation only"
+                reason="Low heuristic score" if quick_score < 0.3 else "Heuristic evaluation only",
+                kind=memory_kind
             )
 
-        return await self._llm_evaluate(user_msg, assistant_msg, quick_score)
+        return await self._llm_evaluate(user_msg, assistant_msg, quick_score, memory_kind)
 
     def _extract_fact_heuristic(self, user_msg: str, assistant_msg: str) -> str:
         """Extract a fact using simple heuristics."""
@@ -309,7 +458,7 @@ class AsyncAutoMemory:
 
         return f"Q: {user_msg}\nA: {assistant_msg}"
 
-    async def _llm_evaluate(self, user_msg: str, assistant_msg: str, quick_score: float) -> MemorySignal:
+    async def _llm_evaluate(self, user_msg: str, assistant_msg: str, quick_score: float, memory_kind: str) -> MemorySignal:
         """Use LLM to evaluate salience."""
         try:
             exchange = f"USER: {user_msg}\n\nASSISTANT: {assistant_msg}"
@@ -332,12 +481,14 @@ class AsyncAutoMemory:
                 should_remember=result.get("should_remember", False),
                 memory_text=result.get("memory_text", ""),
                 salience=result.get("salience", quick_score),
-                reason=result.get("reason", "LLM evaluation")
+                reason=result.get("reason", "LLM evaluation"),
+                kind=memory_kind
             )
         except Exception as e:
             return MemorySignal(
                 should_remember=quick_score >= self.salience_threshold,
                 memory_text=self._extract_fact_heuristic(user_msg, assistant_msg) if quick_score >= self.salience_threshold else "",
                 salience=quick_score,
-                reason=f"LLM error, using heuristic: {e}"
+                reason=f"LLM error, using heuristic: {e}",
+                kind=memory_kind
             )

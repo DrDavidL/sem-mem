@@ -27,6 +27,13 @@ from .decorators import with_memory, with_instructions, with_rag, MemoryChat
 from .config import get_api_key, get_config
 from .vector_index import HNSWIndex, migrate_lsh_to_hnsw
 from .auto_memory import AutoMemory, AsyncAutoMemory, MemorySignal, compute_quick_salience
+from .thread_utils import (
+    generate_thread_title,
+    estimate_message_tokens,
+    select_summary_window,
+    summarize_conversation_window,
+    summarize_deleted_thread,
+)
 
 # Async imports are optional (require aiofiles)
 try:
@@ -53,6 +60,11 @@ __all__ = [
     "AsyncAutoMemory",
     "MemorySignal",
     "compute_quick_salience",
+    "generate_thread_title",
+    "estimate_message_tokens",
+    "select_summary_window",
+    "summarize_conversation_window",
+    "summarize_deleted_thread",
 ]
 
 if _has_async:

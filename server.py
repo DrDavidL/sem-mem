@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sem_mem.async_core import AsyncSemanticMemory
 from sem_mem.config import get_api_key, get_config, CHAT_MODELS, REASONING_EFFORTS, DEFAULT_CHAT_MODEL
+from sem_mem.api.files import router as files_router
 
 
 # --- Pydantic Models ---
@@ -110,6 +111,7 @@ async def lifespan(app: FastAPI):
         embedding_model=config["embedding_model"],
         chat_model=config["chat_model"],
         reasoning_effort=config["reasoning_effort"],
+        include_file_access=True,  # Enable Sema's file access awareness
     )
     yield
     # Cleanup if needed
@@ -129,6 +131,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include routers
+app.include_router(files_router)
 
 
 def get_memory() -> AsyncSemanticMemory:
