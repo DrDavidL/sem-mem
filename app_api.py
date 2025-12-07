@@ -23,11 +23,11 @@ st.set_page_config(page_title="Sem-Mem (API Client)", layout="wide")
 API_URL = os.getenv("SEMMEM_API_URL", "http://localhost:8000")
 
 
-def api_request(method: str, endpoint: str, **kwargs) -> dict:
+def api_request(method: str, endpoint: str, timeout: float = 120.0, **kwargs) -> dict:
     """Make a request to the API server."""
     url = f"{API_URL}{endpoint}"
     try:
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=timeout) as client:
             response = client.request(method, url, **kwargs)
             response.raise_for_status()
             return response.json()
