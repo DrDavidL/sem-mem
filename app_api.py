@@ -135,6 +135,18 @@ with st.sidebar:
                 api_request("PUT", f"/model?model={selected_model}&reasoning_effort={selected_effort}")
                 st.rerun()
 
+    # Web Search Toggle
+    if "web_search" not in st.session_state:
+        st.session_state.web_search = False
+
+    web_search_enabled = st.toggle(
+        "🌐 Web Search",
+        value=st.session_state.web_search,
+        help="Enable web search for real-time information"
+    )
+    if web_search_enabled != st.session_state.web_search:
+        st.session_state.web_search = web_search_enabled
+
     st.divider()
 
     # Instructions Editor
@@ -254,7 +266,11 @@ with tab1:
             prev_id = thread_data["response_id"]
             with st.spinner("Thinking..."):
                 # Get current model config for the request
-                chat_payload = {"query": prompt, "previous_response_id": prev_id}
+                chat_payload = {
+                    "query": prompt,
+                    "previous_response_id": prev_id,
+                    "web_search": st.session_state.web_search
+                }
                 result = api_request(
                     "POST",
                     "/chat",
