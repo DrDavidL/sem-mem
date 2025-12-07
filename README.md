@@ -45,21 +45,21 @@ If you already run Postgres/pgvector, Qdrant, Pinecone, etc. and are happy with 
 │  L1: SmartCache (RAM)                                       │
 │  ├── Protected tier (frequently accessed)                   │
 │  └── Probation tier (recently accessed)                     │
-│  │ → HIT: Instant recall, no disk I/O                       │
+│ → HIT: Instant recall, no disk I/O                       │
 └─────────────────────────┬───────────────────────────────────┘
                           │ MISS
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  L2: HNSW Index (Disk)                                      │
-│  │ → O(log n) approximate nearest neighbor search             │
-│  │ → Results promoted to L1 cache                             │
+│ → O(log n) approximate nearest neighbor search             │
+│ → Results promoted to L1 cache                             │
 └─────────────────────────┬───────────────────────────────────┘
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  LLM (OpenAI Responses API)                                 │
-│  │ + Retrieved memories as context                            │
-│  │ + Persistent instructions                                  │
-│  │ + Optional web search                                      │
+│ + Retrieved memories as context                            │
+│ + Persistent instructions                                  │
+│ + Optional web search                                      │
 └─────────────────────────────────────────────────────────────┘
 ```
 ## Design Choices
@@ -129,20 +129,10 @@ print(chat.send("Where do I live and what do I do?"))
 chat.remember("Patient prefers morning appointments")
 ```
 
-### Medical Education!
+### Medical Education Example
 
 ```python
 # Store teaching case facts - (Not for clinical care - validation/security checks needed!)
-memory.remember("Patient is allergic to penicillin")
-memory.remember("Patient takes metoprolol 25mg daily")
-
-# Later, in a different thread or session...
-response, _, retrieved, _ = memory.chat_with_memory(
-    "What should I check before prescribing antibiotics?"
-)
-# retrieved might include: ["Patient is allergic to penicillin"]
-# response might say: "Before prescribing, note this patient has a documented
-# penicillin allergy and consider appropriate alternatives."
 ```
 
 ## Features
@@ -170,6 +160,7 @@ git clone https://github.com/DrDavidL/sem-mem.git
 cd sem-mem
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install -e ".[all]"    # everything for local dev
 
 # Core package only
 pip install -e .
@@ -187,10 +178,6 @@ pip install -e ".[all]"
 ### Package Installation
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pip install -e ".[all]"    # everything for local dev
-
 # Core package only
 pip install sem-mem
 
