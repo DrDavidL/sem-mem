@@ -5,7 +5,7 @@
 ## Who It's For
 
 - **Personal assistant builders** who want their bot to remember user details across sessions
-- **Domain-specific agents** (clinical, legal, research) that need durable semantic memory
+- **Domain-specific agents** (medical education, legal education, research) that need durable semantic memory
 - **Developers wanting local control** over memory vs. remote vector databases
 
 ## How It Works
@@ -55,10 +55,10 @@ print(chat.send("Where do I live and what do I do?"))
 chat.remember("Patient prefers morning appointments")
 ```
 
-### Clinical Example - if used in a secure environment with IT team approval!
+### Medical Education!
 
 ```python
-# Store clinical facts - if used in a secure environment with IT team approval!
+# Store teaching case facts - (Not for clinical care - validation/security checks needed!)
 memory.remember("Patient is allergic to penicillin")
 memory.remember("Patient takes metoprolol 25mg daily")
 
