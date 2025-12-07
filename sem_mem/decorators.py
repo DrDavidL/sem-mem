@@ -201,17 +201,45 @@ class MemoryChat:
         self,
         memory: SemanticMemory,
         default_instructions: str = "You are a helpful assistant.",
+        auto_remember: Optional[bool] = None,
     ):
         self.memory = memory
         self.default_instructions = default_instructions
         self.previous_response_id: Optional[str] = None
         self.messages: list = []
+        # None means use memory's default setting
+        self._auto_remember = auto_remember
 
-    def send(self, user_input: str) -> str:
-        """Send a message and get a response."""
+    @property
+    def auto_remember(self) -> bool:
+        """Get effective auto-remember setting."""
+        if self._auto_remember is not None:
+            return self._auto_remember
+        return self.memory.auto_memory_enabled
+
+    @auto_remember.setter
+    def auto_remember(self, value: bool):
+        """Set auto-remember for this chat session."""
+        self._auto_remember = value
+
+    def send(self, user_input: str, auto_remember: Optional[bool] = None) -> str:
+        """
+        Send a message and get a response.
+
+        Args:
+            user_input: The user's message
+            auto_remember: Override auto-memory for this message only
+
+        Returns:
+            The assistant's response
+        """
+        # Use call-specific override, then session setting, then memory default
+        effective_auto = auto_remember if auto_remember is not None else self._auto_remember
+
         response_text, response_id, memories, logs = self.memory.chat_with_memory(
             user_input,
-            previous_response_id=self.previous_response_id
+            previous_response_id=self.previous_response_id,
+            auto_remember=effective_auto,
         )
         self.previous_response_id = response_id
         self.messages.append({"role": "user", "content": user_input})

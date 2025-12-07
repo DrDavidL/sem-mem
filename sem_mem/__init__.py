@@ -22,10 +22,11 @@ Usage:
     )
 """
 
-from .core import SemanticMemory, SmartCache
+from .core import SemanticMemory, SmartCache, MEMORY_SYSTEM_CONTEXT, get_memory_system_context
 from .decorators import with_memory, with_instructions, with_rag, MemoryChat
 from .config import get_api_key, get_config
 from .vector_index import HNSWIndex, migrate_lsh_to_hnsw
+from .auto_memory import AutoMemory, AsyncAutoMemory, MemorySignal, compute_quick_salience
 
 # Async imports are optional (require aiofiles)
 try:
@@ -38,12 +39,20 @@ except ImportError:
 __all__ = [
     "SemanticMemory",
     "SmartCache",
+    "MEMORY_SYSTEM_CONTEXT",
+    "get_memory_system_context",
     "MemoryChat",
     "with_memory",
     "with_instructions",
     "with_rag",
     "get_api_key",
     "get_config",
+    "HNSWIndex",
+    "migrate_lsh_to_hnsw",
+    "AutoMemory",
+    "AsyncAutoMemory",
+    "MemorySignal",
+    "compute_quick_salience",
 ]
 
 if _has_async:

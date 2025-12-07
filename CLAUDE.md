@@ -22,9 +22,34 @@ Tiered semantic memory system for AI agents using HNSW-based vector indexing.
 |-------------|---------|-------|----------|-------------|-------------|
 | **Instructions** | `instructions.txt` | All threads | Never | Sidebar editor, `instruct:` cmd, file edit | Never |
 | **L1 (Hot Cache)** | RAM (SmartCache) | All threads | LRU | None (automatic only) | Promoted from L2 on access; auto-saved to L2 after 6+ hits |
-| **L2 (Cold Storage)** | HNSW index | All threads | Never | `remember:` cmd, PDF upload, Save Thread button | Auto-saved from L1 after 6+ hits |
+| **L2 (Cold Storage)** | HNSW index | All threads | Never | `remember:` cmd, PDF upload, Save Thread button | Auto-saved from L1 after 6+ hits; **Auto-memory** saves salient exchanges |
 | **Thread History** | Session state | Per thread | New thread | None | Automatic on chat |
 | **Responses API State** | OpenAI servers | Per thread | New thread | None | Automatic via `previous_response_id` |
+
+### Auto-Memory (Salience Detection)
+
+Auto-memory automatically saves important exchanges to L2 without explicit user action. It uses a hybrid approach:
+
+1. **Heuristic scoring** (free): Checks for explicit markers ("remember this", "I am a..."), confirmation patterns, named entities
+2. **LLM judge** (cheap model): For ambiguous cases (salience 0.3-0.7), uses gpt-4.1-mini to evaluate
+
+**What triggers auto-save:**
+- Personal facts: "I'm a physician", "My name is David"
+- Explicit markers: "Remember that...", "This is important"
+- Conclusions: "So we decided to...", "The answer is..."
+- Corrections: "Actually, I meant...", "That's not right, it should be..."
+
+**Configuration:**
+```python
+# Enable (default for API, disabled for Streamlit UI)
+memory = SemanticMemory(api_key="...", auto_memory=True)
+
+# Adjust threshold (default 0.5)
+memory = SemanticMemory(api_key="...", auto_memory_threshold=0.6)
+
+# Disable for specific calls
+response = memory.chat_with_memory(query, auto_remember=False)
+```
 
 ### How Each Memory Is Used
 

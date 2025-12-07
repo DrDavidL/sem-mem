@@ -1,7 +1,4 @@
 import streamlit as st
-import os
-import glob
-import json
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -28,6 +25,7 @@ if "memory_agent" not in st.session_state:
             embedding_model=config["embedding_model"],
             chat_model=config["chat_model"],
             reasoning_effort=config["reasoning_effort"],
+            auto_memory=False,  # Streamlit UI manages its own memory operations
         )
 
 if "memory_agent" not in st.session_state:
@@ -107,6 +105,16 @@ with st.sidebar:
             st.session_state.reasoning_effort = selected_effort
             agent.reasoning_effort = selected_effort
 
+    # Web Search Toggle
+    web_search_enabled = st.toggle(
+        "🌐 Web Search",
+        value=st.session_state.get("web_search", False),
+        help="Enable web search for real-time information"
+    )
+    if web_search_enabled != st.session_state.get("web_search", False):
+        st.session_state.web_search = web_search_enabled
+        agent.web_search_enabled = web_search_enabled
+
     st.divider()
 
     # Instructions Editor
@@ -137,10 +145,12 @@ with st.sidebar:
 
     # 2. JSON Merger
     with st.expander("📥 Merge Minds (JSON)"):
-        uploaded_json = st.file_uploader("Drop bucket_xxx.json", type="json")
-        if uploaded_json and st.button("Merge Bucket"):
-            msg = agent.import_bucket(uploaded_json)
-            st.success(msg)
+        uploaded_json = st.file_uploader("Drop memories.json", type="json")
+        if uploaded_json and st.button("Import Memories"):
+            import json
+            entries = json.load(uploaded_json)
+            count = agent.import_memories(entries)
+            st.success(f"Imported {count} new memories!")
 
     st.divider()
     
@@ -157,25 +167,19 @@ with st.sidebar:
     
     st.divider()
 
-    # 4. Global Stats - use agent.storage_dir instead of hardcoded path
-    bucket_pattern = os.path.join(agent.storage_dir, "bucket_*.json")
-    bucket_files = glob.glob(bucket_pattern)
-    total_memories = 0
+    # 4. Global Stats - using HNSW index
+    stats = agent.get_stats()
+    st.metric("Total L2 Memories", stats["l2_memories"])
+    st.metric("L1 Cache Size", stats["l1_cache_size"])
+
+    # Get all memories for visualization
     all_memories = []
-
-    for f in bucket_files:
-        with open(f, 'r') as file:
-            data = json.load(file)
-            total_memories += len(data)
-            for item in data:
-                all_memories.append({
-                    "text": item['text'],
-                    "bucket": os.path.basename(f).replace(".json", ""),
-                    "vector": item['vector']
-                })
-
-    st.metric("Total L2 Memories", total_memories)
-    st.metric("Active Buckets", len(bucket_files))
+    for entry in agent.vector_index.get_all_entries():
+        all_memories.append({
+            "text": entry['text'],
+            "vector": entry['vector'],
+            "source": entry.get('metadata', {}).get('source', 'unknown'),
+        })
 
 # --- Main Interface ---
 st.title("Sem-Mem: The Tiered Memory Agent")
@@ -260,10 +264,10 @@ with tab2:
         components = pca.fit_transform(vectors)
         df['x'] = components[:, 0]
         df['y'] = components[:, 1]
-        
+
         fig = px.scatter(
-            df, x='x', y='y', color='bucket', 
-            hover_data=['text'], title="Memory Clusters (LSH Buckets)",
+            df, x='x', y='y', color='source',
+            hover_data=['text'], title="Memory Clusters (HNSW Index)",
             template="plotly_dark", size_max=15
         )
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)

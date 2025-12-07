@@ -8,7 +8,7 @@ import aiofiles
 import numpy as np
 from openai import AsyncOpenAI
 from typing import List, Dict, Optional, Tuple
-from .core import SmartCache
+from .core import SmartCache, get_memory_system_context
 from .config import QUERY_EXPANSION_MODEL
 from .vector_index import HNSWIndex
 
@@ -31,6 +31,10 @@ class AsyncSemanticMemory:
         max_concurrent_embeddings: int = 10,
         chat_model: str = "gpt-5.1",
         reasoning_effort: str = "low",
+        auto_memory: bool = True,
+        auto_memory_threshold: float = 0.5,
+        include_memory_context: bool = True,
+        web_search: bool = False,
     ):
         self.client = AsyncOpenAI(api_key=api_key)
         self.storage_dir = storage_dir
@@ -39,6 +43,10 @@ class AsyncSemanticMemory:
         self.embedding_dim = embedding_dim
         self.chat_model = chat_model
         self.reasoning_effort = reasoning_effort
+        self.auto_memory_enabled = auto_memory
+        self.auto_memory_threshold = auto_memory_threshold
+        self.include_memory_context = include_memory_context
+        self.web_search_enabled = web_search
 
         # Semaphore to limit concurrent API calls
         self._embedding_semaphore = asyncio.Semaphore(max_concurrent_embeddings)
@@ -52,9 +60,23 @@ class AsyncSemanticMemory:
             embedding_dim=embedding_dim,
         )
 
+        # Auto-memory evaluator (lazy init)
+        self._auto_memory = None
+
         # Ensure storage directory exists (sync is fine for init)
         if not os.path.exists(storage_dir):
             os.makedirs(storage_dir)
+
+    @property
+    def auto_memory(self):
+        """Lazy-initialize async auto-memory evaluator."""
+        if self._auto_memory is None and self.auto_memory_enabled:
+            from .auto_memory import AsyncAutoMemory
+            self._auto_memory = AsyncAutoMemory(
+                client=self.client,
+                salience_threshold=self.auto_memory_threshold,
+            )
+        return self._auto_memory
 
     async def load_instructions(self) -> str:
         """Load instructions from file."""
@@ -280,6 +302,8 @@ class AsyncSemanticMemory:
         previous_response_id: Optional[str] = None,
         model: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        auto_remember: Optional[bool] = None,
+        web_search: Optional[bool] = None,
     ) -> Tuple[str, str, List[str], List[str]]:
         """
         Chat with RAG using Responses API.
@@ -289,12 +313,20 @@ class AsyncSemanticMemory:
             previous_response_id: For conversation continuity
             model: Override the default chat model (gpt-5.1, gpt-4.1)
             reasoning_effort: For reasoning models: "low", "medium", "high"
+            auto_remember: Override auto-memory setting for this call
+            web_search: Override web search setting for this call
 
         Returns:
             Tuple of (response_text, response_id, memories, logs)
         """
         memories, logs = await self.recall(user_query)
-        instructions = await self.load_instructions() or "You are a helpful assistant."
+
+        # Build instructions: memory context (with current timestamp) + user instructions
+        user_instructions = await self.load_instructions() or "You are a helpful assistant."
+        if self.include_memory_context:
+            instructions = f"{get_memory_system_context()}\n\n{user_instructions}"
+        else:
+            instructions = user_instructions
 
         if memories:
             context_block = "\n".join([f"- {m}" for m in memories])
@@ -305,6 +337,7 @@ class AsyncSemanticMemory:
         # Use provided model or fall back to instance default
         use_model = model or self.chat_model
         use_reasoning = reasoning_effort or self.reasoning_effort
+        use_web_search = web_search if web_search is not None else self.web_search_enabled
 
         # Build base parameters
         create_params: Dict = {
@@ -316,6 +349,11 @@ class AsyncSemanticMemory:
         if previous_response_id:
             create_params["previous_response_id"] = previous_response_id
 
+        # Add web search tool if enabled
+        if use_web_search:
+            create_params["tools"] = [{"type": "web_search_preview"}]
+            logs.append("🌐 Web search enabled")
+
         # Reasoning models (gpt-5.1, o1, o3) require special handling
         if use_model in ("gpt-5.1", "o1", "o3"):
             create_params["reasoning"] = {"effort": use_reasoning}
@@ -323,7 +361,21 @@ class AsyncSemanticMemory:
             create_params["temperature"] = 0.7
 
         response = await self.client.responses.create(**create_params)  # type: ignore
-        return response.output_text, response.id, memories, logs
+        response_text = response.output_text
+
+        # Auto-memory: evaluate and store salient exchanges
+        should_auto_remember = auto_remember if auto_remember is not None else self.auto_memory_enabled
+        if should_auto_remember and self.auto_memory:
+            signal = await self.auto_memory.evaluate(user_query, response_text)
+            if signal.should_remember and signal.memory_text:
+                await self.remember(signal.memory_text, metadata={
+                    "source": "auto_memory",
+                    "salience": signal.salience,
+                    "reason": signal.reason,
+                })
+                logs.append(f"💾 Auto-saved: {signal.reason} (salience: {signal.salience:.2f})")
+
+        return response_text, response.id, memories, logs
 
     async def bulk_learn_texts(
         self,

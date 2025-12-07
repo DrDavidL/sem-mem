@@ -1,6 +1,6 @@
 # Sem-Mem: Tiered Semantic Memory for AI Agents
 
-**Sem-Mem** is a local, privacy-first memory layer for OpenAI-based agents. It implements a **Tiered Memory** architecture using HNSW (Hierarchical Navigable Small World) indexing for fast approximate nearest-neighbor search with O(log n) complexity.
+**Sem-Mem** is a semantic memory layer for OpenAI-based agents with **local storage**. It implements a **Tiered Memory** architecture using HNSW (Hierarchical Navigable Small World) indexing for fast approximate nearest-neighbor search with O(log n) complexity.
 
 It features a **Tiered "Smart Cache"** system (Segmented LRU) that mimics human memory:
 1.  **L1 (Hot/RAM):** Instant access to recently used or high-frequency data (Segmented into "Probation" and "Protected" tiers).
@@ -9,9 +9,12 @@ It features a **Tiered "Smart Cache"** system (Segmented LRU) that mimics human 
 ## Features
 
 * **Zero-Latency "Hot" Recall:** Uses a Segmented LRU cache to keep relevant context in RAM.
-* **Privacy-First:** Data stays on your local machine. Only query vectors are sent to OpenAI.
+* **Local Storage:** Your memory index (HNSW) and instructions stay on your machine—not in a cloud database. Note: Text is still sent to OpenAI for embeddings and chat responses.
 * **HNSW Index:** O(log n) approximate nearest neighbor search using hnswlib.
 * **Query Expansion:** LLM-powered alternative query generation for better recall.
+* **Auto-Memory (Salience Detection):** Automatically saves important exchanges (personal facts, decisions, corrections) without explicit user action.
+* **Web Search:** Built-in web search via OpenAI's Responses API for real-time information.
+* **Memory-Aware Context:** The model understands it has semantic memory and can help users manage it.
 * **Thread-Safe:** Concurrent access support with RLock synchronization.
 * **Model Selection:** Support for reasoning models (gpt-5.1, o1, o3) with configurable reasoning effort.
 * **PDF Ingestion:** "Read" clinical guidelines or papers and auto-chunk them into long-term memory.
@@ -173,6 +176,8 @@ memory = SemanticMemory(
     api_key="sk-...",
     chat_model="gpt-5.1",           # or "gpt-4.1"
     reasoning_effort="medium",       # for reasoning models
+    auto_memory=True,                # auto-save important exchanges (default)
+    web_search=False,                # enable web search (default: off)
 )
 
 # Store facts
@@ -182,7 +187,8 @@ memory.add_instruction("I am an informatics physician")
 # Query with RAG
 response, resp_id, mems, logs = memory.chat_with_memory(
     "What allergies should I check?",
-    previous_response_id=prev_id  # For conversation continuity
+    previous_response_id=prev_id,  # For conversation continuity
+    web_search=True,               # Enable web search for this query
 )
 ```
 
@@ -206,6 +212,17 @@ Change models via:
 - **API**: `PUT /model?model=gpt-4.1`
 - **Config**: `CHAT_MODEL=gpt-4.1` in `.env`
 - **Code**: `SemanticMemory(chat_model="gpt-4.1")`
+
+## Web Search
+
+Sem-Mem integrates OpenAI's built-in web search tool for real-time information retrieval.
+
+Enable via:
+- **UI**: Toggle "🌐 Web Search" in the sidebar
+- **Code**: `SemanticMemory(web_search=True)` or `chat_with_memory(..., web_search=True)`
+- **API**: `POST /chat` with `{"query": "...", "web_search": true}`
+
+When enabled, the model can search the web to answer questions about current events, recent data, or topics not in your semantic memory.
 
 ## Chat Commands
 
@@ -241,11 +258,12 @@ API documentation available at `http://localhost:8000/docs` when server is runni
 .
 ├── sem_mem/
 │   ├── __init__.py          # Package exports
-│   ├── core.py              # SemanticMemory, SmartCache
+│   ├── core.py              # SemanticMemory, SmartCache, MEMORY_SYSTEM_CONTEXT
 │   ├── async_core.py        # Async version for FastAPI
 │   ├── config.py            # Configuration and secret loading
 │   ├── vector_index.py      # HNSWIndex for L2 storage
-│   └── decorators.py        # @with_memory, @with_rag, MemoryChat
+│   ├── decorators.py        # @with_memory, @with_rag, MemoryChat
+│   └── auto_memory.py       # AutoMemory salience detection
 ├── local_memory/            # HNSW index files + instructions.txt
 ├── app.py                   # Streamlit standalone app
 ├── app_api.py               # Streamlit API client app
@@ -262,8 +280,34 @@ API documentation available at `http://localhost:8000/docs` when server is runni
 |-------------|---------|-------|----------|-------------|-------------|
 | **Instructions** | `instructions.txt` | All threads | Never | Sidebar editor, `instruct:` cmd | Never |
 | **L1 (Hot Cache)** | RAM (SmartCache) | All threads | LRU | None (automatic) | Promoted from L2 on access |
-| **L2 (Cold Storage)** | HNSW index | All threads | Never | `remember:` cmd, PDF upload | Auto-saved from L1 after 6+ hits |
+| **L2 (Cold Storage)** | HNSW index | All threads | Never | `remember:` cmd, PDF upload | Auto-saved from L1 after 6+ hits; Auto-memory |
 | **Thread History** | Session state | Per thread | New thread | None | Automatic on chat |
+
+### Auto-Memory (Salience Detection)
+
+Auto-memory automatically saves important exchanges without explicit user action. Enabled by default for API usage.
+
+**What gets auto-saved:**
+- Personal facts: "I'm a physician", "My name is David"
+- Explicit markers: "Remember that...", "This is important"
+- Decisions/conclusions reached in conversation
+- Corrections to previous assumptions
+
+**How it works:**
+1. Cheap heuristics check for obvious signals (no API cost)
+2. For ambiguous cases, uses `gpt-4.1-mini` to evaluate salience
+3. High-salience content is distilled and saved to L2
+
+```python
+# Enabled by default
+memory = SemanticMemory(api_key="...")
+
+# Disable globally
+memory = SemanticMemory(api_key="...", auto_memory=False)
+
+# Disable per-call
+response = memory.chat_with_memory(query, auto_remember=False)
+```
 
 ### Multi-Session Behavior
 

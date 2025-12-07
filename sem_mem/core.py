@@ -1,5 +1,6 @@
 import os
 import threading
+from datetime import datetime
 import numpy as np
 from openai import OpenAI
 from collections import OrderedDict
@@ -7,6 +8,37 @@ from pypdf import PdfReader
 from typing import List, Dict, Optional
 from .config import QUERY_EXPANSION_MODEL
 from .vector_index import HNSWIndex
+
+# Template for system context (use get_memory_system_context() to get with current time)
+_MEMORY_SYSTEM_CONTEXT_TEMPLATE = """Current date and time: {datetime}
+
+You have access to a semantic memory system that helps you remember and recall information across conversations.
+
+How your memory works:
+- **Retrieved Context**: When relevant memories are found, they appear at the start of the user's message as "Relevant context from memory"
+- **Auto-Memory**: Important facts from our conversations (like personal details, preferences, decisions) are automatically saved for future reference
+- **Instructions**: You have persistent instructions that guide your behavior
+
+When you see retrieved context:
+- Treat it as reliable information from previous conversations
+- Use it naturally without explicitly mentioning "my memory says..."
+- If context seems outdated or contradicted by the user, trust the user's current input
+
+You can help the user manage their memory by suggesting they use:
+- "remember: <fact>" to explicitly save important information
+- "instruct: <guideline>" to add persistent behavioral instructions
+"""
+
+
+def get_memory_system_context() -> str:
+    """Get the memory system context with current date/time."""
+    now = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+    return _MEMORY_SYSTEM_CONTEXT_TEMPLATE.format(datetime=now)
+
+
+# For backwards compatibility, provide a static version (without timestamp)
+MEMORY_SYSTEM_CONTEXT = _MEMORY_SYSTEM_CONTEXT_TEMPLATE.format(datetime="(timestamp not available)")
+
 
 class SmartCache:
     def __init__(self, capacity=20, protected_ratio=0.8, persist_threshold=6):
@@ -131,6 +163,10 @@ class SemanticMemory:
         embedding_dim: int = 1536,
         chat_model: str = "gpt-5.1",
         reasoning_effort: str = "low",
+        auto_memory: bool = True,
+        auto_memory_threshold: float = 0.5,
+        include_memory_context: bool = True,
+        web_search: bool = False,
     ):
         self.client = OpenAI(api_key=api_key)
         self.storage_dir = storage_dir
@@ -139,6 +175,10 @@ class SemanticMemory:
         self.embedding_dim = embedding_dim
         self.chat_model = chat_model
         self.reasoning_effort = reasoning_effort
+        self.auto_memory_enabled = auto_memory
+        self.auto_memory_threshold = auto_memory_threshold
+        self.include_memory_context = include_memory_context
+        self.web_search_enabled = web_search
 
         # Segmented LRU cache for hot items (L1)
         self.local_cache = SmartCache(capacity=cache_size)
@@ -149,8 +189,22 @@ class SemanticMemory:
             embedding_dim=embedding_dim,
         )
 
+        # Auto-memory evaluator (lazy init to avoid import if disabled)
+        self._auto_memory = None
+
         if not os.path.exists(storage_dir):
             os.makedirs(storage_dir)
+
+    @property
+    def auto_memory(self):
+        """Lazy-initialize auto-memory evaluator."""
+        if self._auto_memory is None and self.auto_memory_enabled:
+            from .auto_memory import AutoMemory
+            self._auto_memory = AutoMemory(
+                client=self.client,
+                salience_threshold=self.auto_memory_threshold,
+            )
+        return self._auto_memory
 
     def _is_reasoning_model(self) -> bool:
         """Check if current model is a reasoning model."""
@@ -453,6 +507,8 @@ class SemanticMemory:
         previous_response_id: Optional[str] = None,
         model: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        auto_remember: Optional[bool] = None,
+        web_search: Optional[bool] = None,
     ):
         """
         Agentic Wrapper using Responses API.
@@ -462,14 +518,20 @@ class SemanticMemory:
             previous_response_id: For conversation continuity
             model: Override the default chat model (gpt-5.1, gpt-4.1)
             reasoning_effort: For reasoning models: "low", "medium", "high"
+            auto_remember: Override auto-memory setting for this call
+            web_search: Override web search setting for this call
 
         Returns:
             Tuple of (response_text, response_id, memories, logs)
         """
         memories, logs = self.recall(user_query)
 
-        # Build instructions from file
-        instructions = self.load_instructions() or "You are a helpful assistant."
+        # Build instructions: memory context (with current timestamp) + user instructions
+        user_instructions = self.load_instructions() or "You are a helpful assistant."
+        if self.include_memory_context:
+            instructions = f"{get_memory_system_context()}\n\n{user_instructions}"
+        else:
+            instructions = user_instructions
 
         # Build input with memory context
         if memories:
@@ -481,6 +543,7 @@ class SemanticMemory:
         # Use provided model or fall back to instance default
         use_model = model or self.chat_model
         use_reasoning = reasoning_effort or self.reasoning_effort
+        use_web_search = web_search if web_search is not None else self.web_search_enabled
 
         # Build base parameters
         create_params: Dict = {
@@ -492,6 +555,11 @@ class SemanticMemory:
         if previous_response_id:
             create_params["previous_response_id"] = previous_response_id
 
+        # Add web search tool if enabled
+        if use_web_search:
+            create_params["tools"] = [{"type": "web_search_preview"}]
+            logs.append("🌐 Web search enabled")
+
         # Reasoning models (gpt-5.1, o1, o3) require special handling
         if use_model in ("gpt-5.1", "o1", "o3"):
             # Reasoning models don't support temperature
@@ -502,4 +570,18 @@ class SemanticMemory:
             create_params["temperature"] = 0.7
 
         response = self.client.responses.create(**create_params)  # type: ignore
-        return response.output_text, response.id, memories, logs
+        response_text = response.output_text
+
+        # Auto-memory: evaluate and store salient exchanges
+        should_auto_remember = auto_remember if auto_remember is not None else self.auto_memory_enabled
+        if should_auto_remember and self.auto_memory:
+            signal = self.auto_memory.evaluate(user_query, response_text)
+            if signal.should_remember and signal.memory_text:
+                self.remember(signal.memory_text, metadata={
+                    "source": "auto_memory",
+                    "salience": signal.salience,
+                    "reason": signal.reason,
+                })
+                logs.append(f"💾 Auto-saved: {signal.reason} (salience: {signal.salience:.2f})")
+
+        return response_text, response.id, memories, logs

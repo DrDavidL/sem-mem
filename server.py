@@ -20,6 +20,8 @@ class ChatRequest(BaseModel):
     previous_response_id: Optional[str] = Field(None, description="For conversation continuity")
     model: Optional[str] = Field(None, description="Chat model (gpt-5.1, gpt-4.1)")
     reasoning_effort: Optional[str] = Field(None, description="For reasoning models: low, medium, high")
+    auto_remember: Optional[bool] = Field(None, description="Override auto-memory for this request")
+    web_search: Optional[bool] = Field(None, description="Enable web search for this request")
 
 
 class ChatResponse(BaseModel):
@@ -152,13 +154,15 @@ async def chat(
     """
     Chat with RAG-enhanced responses.
     Maintains conversation state via previous_response_id.
-    Optionally specify model and reasoning_effort.
+    Optionally specify model, reasoning_effort, auto_remember, and web_search.
     """
     response_text, response_id, memories, logs = await mem.chat_with_memory(
         request.query,
         previous_response_id=request.previous_response_id,
         model=request.model,
         reasoning_effort=request.reasoning_effort,
+        auto_remember=request.auto_remember,
+        web_search=request.web_search,
     )
     return ChatResponse(
         response=response_text,
