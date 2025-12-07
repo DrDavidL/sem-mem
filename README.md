@@ -30,7 +30,7 @@ Sem-Mem’s design trades:
 
 - **Horizontal scalability** and **multi-tenant complexity**
 
-for
+        for
 
 - **Simplicity**, **local control**, and **low operational overhead**.
 
