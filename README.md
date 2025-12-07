@@ -29,7 +29,7 @@ You absolutely can (and should) use hosted vector databases for many workloads. 
 Sem-Mem’s design trades:
 
 - **Horizontal scalability** and **multi-tenant complexity**
-- for
+for
 - **Simplicity**, **local control**, and **low operational overhead**.
 
 If you already run Postgres/pgvector, Qdrant, Pinecone, etc. and are happy with that, you may not need Sem-Mem. If you just want your agent to *remember things* without standing up new infra, Sem-Mem is likely a better fit.
