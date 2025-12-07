@@ -311,6 +311,9 @@ pytest
 ruff check .
 ```
 
+<img width="2242" height="1672" alt="CleanShot 2025-12-06 at 18 33 59@2x" src="https://github.com/user-attachments/assets/5a81b41f-d082-4cd5-a4bf-3360c4d7a529" />
+
+
 ## Technical Details
 
 - **HNSW**: Hierarchical Navigable Small World graph for O(log n) approximate nearest neighbor search
