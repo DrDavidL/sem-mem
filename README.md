@@ -1,11 +1,11 @@
 # Sem-Mem: Tiered Semantic Memory for AI Agents
 
-> **Drop-in semantic memory for OpenAI agents: local HNSW-backed storage with auto-memory and RAG out of the box.**
+> **Drop-in semantic memory for OpenAI agents: local, HNSW-backed storage with auto-memory and RAG out of the box.**
 
 ## Who It's For
 
 - **Personal assistant builders** who want their bot to remember user details across sessions
-- **Domain-specific agents** (clinical, legal, research) needing local semantic storage
+- **Domain-specific agents** (clinical, legal, research) that need durable semantic memory
 - **Developers wanting local control** over memory vs. remote vector databases
 
 ## How It Works
@@ -19,21 +19,21 @@
 │  L1: SmartCache (RAM)                                       │
 │  ├── Protected tier (frequently accessed)                   │
 │  └── Probation tier (recently accessed)                     │
-│  → HIT: Instant recall, no disk I/O                        │
+│  │ → HIT: Instant recall, no disk I/O                       │
 └─────────────────────────┬───────────────────────────────────┘
                           │ MISS
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  L2: HNSW Index (Disk)                                      │
-│  → O(log n) approximate nearest neighbor search             │
-│  → Results promoted to L1 cache                             │
+│  │ → O(log n) approximate nearest neighbor search             │
+│  │ → Results promoted to L1 cache                             │
 └─────────────────────────┬───────────────────────────────────┘
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  LLM (OpenAI Responses API)                                 │
-│  + Retrieved memories as context                            │
-│  + Persistent instructions                                  │
-│  + Optional web search                                      │
+│  │ + Retrieved memories as context                            │
+│  │ + Persistent instructions                                  │
+│  │ + Optional web search                                      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -48,29 +48,27 @@ chat = MemoryChat(memory)
 
 # The "aha" moment: it remembers you
 print(chat.send("My name is Sam, I'm a cardiology fellow in Boston."))
-# → "Nice to meet you, Sam! Cardiology is a rewarding field..."
-
 print(chat.send("Where do I live and what do I do?"))
-# → "You're a cardiology fellow in Boston."
+# → Model can answer from semantic memory, not just the last message
 
 # Explicit memory storage
 chat.remember("Patient prefers morning appointments")
 ```
 
-### Clinical Example
+### Clinical Example - if used in a secure environment with IT team approval!
 
 ```python
-# Store clinical facts
+# Store clinical facts - if used in a secure environment with IT team approval!
 memory.remember("Patient is allergic to penicillin")
 memory.remember("Patient takes metoprolol 25mg daily")
 
-# Later, in a different session...
+# Later, in a different thread or session...
 response, _, retrieved, _ = memory.chat_with_memory(
     "What should I check before prescribing antibiotics?"
 )
-# Retrieved: ["Patient is allergic to penicillin"]
-# Response: "Before prescribing, note that this patient has a documented
-#            penicillin allergy. Consider alternatives like azithromycin..."
+# retrieved might include: ["Patient is allergic to penicillin"]
+# response might say: "Before prescribing, note this patient has a documented
+# penicillin allergy and consider appropriate alternatives."
 ```
 
 ## Features
