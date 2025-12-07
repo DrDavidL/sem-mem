@@ -1,0 +1,51 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MEMORY_STORAGE_DIR=/app/local_memory
+      - CACHE_SIZE=20
+      - EMBEDDING_MODEL=text-embedding-3-small
+    volumes:
+      - memory_data:/app/local_memory
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Streamlit UI that uses the API (recommended)
+  ui:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - SEMMEM_API_URL=http://api:8000
+    volumes:
+      - ./app_api.py:/app/app_api.py:ro
+    command: ["streamlit", "run", "app_api.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Alternative: Standalone Streamlit (direct library access, no API)
+  ui-standalone:
+    build: .
+    ports:
+      - "8502:8502"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - memory_data:/app/local_memory
+      - ./app.py:/app/app.py:ro
+    command: ["streamlit", "run", "app.py", "--server.port=8502", "--server.address=0.0.0.0"]
+    restart: unless-stopped
+    profiles:
+      - standalone
+
+volumes:
+  memory_data:

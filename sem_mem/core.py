@@ -1,65 +1,97 @@
 import os
-import json
+import threading
 import numpy as np
 from openai import OpenAI
-from collections import deque, OrderedDict
+from collections import OrderedDict
 from pypdf import PdfReader
-from typing import List, Dict
+from typing import List, Dict, Optional
+from .config import QUERY_EXPANSION_MODEL
+from .vector_index import HNSWIndex
 
 class SmartCache:
-    def __init__(self, capacity=20, protected_ratio=0.8):
+    def __init__(self, capacity=20, protected_ratio=0.8, persist_threshold=6):
         self.capacity = capacity
+        self.persist_threshold = persist_threshold  # Hits before auto-save to L2
         # Split memory into two segments
         self.protected_cap = int(capacity * protected_ratio)
         self.probation_cap = capacity - self.protected_cap
-        
+
         # OrderedDict allows us to move items to 'end' (Newest) easily
         self.protected = OrderedDict()
         self.probation = OrderedDict()
+        # Track hit counts per item (by text key)
+        self.hit_counts = {}
+        # Track items that need to be persisted to L2
+        self.pending_persist = []
+        # Thread safety for concurrent access
+        self._lock = threading.RLock()
 
     def get(self, key_text):
         """
         Retrieves an item and updates its status (The "Reset" Logic).
+        Returns (item, status, should_persist).
         """
-        # 1. Check Protected (VIP)
-        if key_text in self.protected:
-            # HIT in Protected: "Reset" it to the newest position
-            item = self.protected.pop(key_text)
-            self.protected[key_text] = item
-            return item, "Protected"
+        with self._lock:
+            # 1. Check Protected (VIP)
+            if key_text in self.protected:
+                # HIT in Protected: "Reset" it to the newest position
+                item = self.protected.pop(key_text)
+                self.protected[key_text] = item
+                should_persist = self._increment_hits(key_text, item)
+                return item, "Protected", should_persist
 
-        # 2. Check Probation (New/Transient)
-        if key_text in self.probation:
-            # HIT in Probation: PROMOTE to Protected
-            item = self.probation.pop(key_text)
-            self._add_to_protected(key_text, item)
-            return item, "Promoted to Protected"
-            
-        return None, "Miss"
+            # 2. Check Probation (New/Transient)
+            if key_text in self.probation:
+                # HIT in Probation: PROMOTE to Protected
+                item = self.probation.pop(key_text)
+                self._add_to_protected(key_text, item)
+                should_persist = self._increment_hits(key_text, item)
+                return item, "Promoted to Protected", should_persist
+
+            return None, "Miss", False
+
+    def _increment_hits(self, key_text, item):
+        """Increment hit count and check if item should be persisted."""
+        self.hit_counts[key_text] = self.hit_counts.get(key_text, 0) + 1
+        if self.hit_counts[key_text] == self.persist_threshold:
+            self.pending_persist.append(item)
+            return True
+        return False
+
+    def get_pending_persist(self):
+        """Get and clear items pending persistence to L2."""
+        with self._lock:
+            items = self.pending_persist[:]
+            self.pending_persist = []
+            return items
 
     def add(self, item):
         """
         New items always start in Probation.
         """
         key = item['text']
-        # If it's already known, just refresh it
-        if key in self.protected or key in self.probation:
-            self.get(key)
-            return
+        with self._lock:
+            # If it's already known, just refresh it
+            if key in self.protected or key in self.probation:
+                # Release lock before calling get() which also acquires it
+                pass
+            else:
+                # Add to Probation (Newest)
+                self.probation[key] = item
 
-        # Add to Probation (Newest)
-        self.probation[key] = item
-        
-        # If Probation is full, evict the oldest (FIFO behavior for new stuff)
-        if len(self.probation) > self.probation_cap:
-            self.probation.popitem(last=False) # last=False pops the OLDEST
+                # If Probation is full, evict the oldest (FIFO behavior for new stuff)
+                if len(self.probation) > self.probation_cap:
+                    self.probation.popitem(last=False)  # last=False pops the OLDEST
+                return
+        # Refresh existing item (outside lock since get() acquires it)
+        self.get(key)
 
     def _add_to_protected(self, key, item):
         """
         Handles the logic of adding to the VIP section.
         """
         self.protected[key] = item
-        
+
         # If Protected is full, we don't delete. We DEMOTE the oldest VIP back to Probation.
         # This gives it one last chance to be used before dying.
         if len(self.protected) > self.protected_cap:
@@ -68,41 +100,129 @@ class SmartCache:
 
     def list_items(self):
         """Helper to visualize the segments."""
-        return {
-            "Protected (Sticky)": list(reversed(self.protected.values())),
-            "Probation (Transient)": list(reversed(self.probation.values()))
-        }
+        with self._lock:
+            return {
+                "Protected (Sticky)": list(reversed(self.protected.values())),
+                "Probation (Transient)": list(reversed(self.probation.values()))
+            }
+
+    def __iter__(self):
+        """Iterate over all cached items (Protected first, then Probation)."""
+        with self._lock:
+            # Create a snapshot to iterate over
+            items = list(reversed(list(self.protected.values()))) + \
+                    list(reversed(list(self.probation.values())))
+        yield from items
+
+    def __contains__(self, item):
+        """Check if an item is in the cache by its text key."""
+        key = item['text'] if isinstance(item, dict) else item
+        with self._lock:
+            return key in self.protected or key in self.probation
+
 
 class SemanticMemory:
-    def __init__(self, api_key=None, storage_dir="./local_memory", cache_size=20):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        storage_dir: str = "./local_memory",
+        cache_size: int = 20,
+        embedding_model: str = "text-embedding-3-small",
+        embedding_dim: int = 1536,
+        chat_model: str = "gpt-5.1",
+        reasoning_effort: str = "low",
+    ):
         self.client = OpenAI(api_key=api_key)
         self.storage_dir = storage_dir
-        
-        # REPLACE deque with SmartCache
+        self.instructions_file = os.path.join(storage_dir, "instructions.txt")
+        self.embedding_model = embedding_model
+        self.embedding_dim = embedding_dim
+        self.chat_model = chat_model
+        self.reasoning_effort = reasoning_effort
+
+        # Segmented LRU cache for hot items (L1)
         self.local_cache = SmartCache(capacity=cache_size)
-        
-        # (Rest of init remains the same...)
-        np.random.seed(42) 
-        self.projection_matrix = np.random.randn(1536, 5)
-        if not os.path.exists(storage_dir): os.makedirs(storage_dir)
 
-    def _get_embedding(self, text):
-        resp = self.client.embeddings.create(input=text, model="text-embedding-3-small")
+        # HNSW index for L2 storage
+        self.vector_index = HNSWIndex(
+            storage_dir=storage_dir,
+            embedding_dim=embedding_dim,
+        )
+
+        if not os.path.exists(storage_dir):
+            os.makedirs(storage_dir)
+
+    def _is_reasoning_model(self) -> bool:
+        """Check if current model is a reasoning model."""
+        return self.chat_model in ("gpt-5.1", "o1", "o3")
+
+    def _expand_query(self, query: str) -> List[str]:
+        """
+        Use a fast/cheap model to generate alternative search queries.
+        This improves recall by searching with multiple phrasings.
+
+        Returns list of queries including the original.
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model=QUERY_EXPANSION_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Generate 2-3 alternative phrasings of the user's question "
+                            "that would match stored facts. Focus on:\n"
+                            "- Converting questions to statements (e.g., 'Where do I live?' -> 'I live in')\n"
+                            "- Extracting key entities and topics\n"
+                            "- Using synonyms\n\n"
+                            "Return ONLY the alternative queries, one per line. No numbering or explanations."
+                        )
+                    },
+                    {"role": "user", "content": query}
+                ],
+                temperature=0.3,
+                max_tokens=100,
+            )
+            content = response.choices[0].message.content or ""
+            alternatives = content.strip().split("\n")
+            # Clean and filter empty lines
+            alternatives = [q.strip() for q in alternatives if q.strip()]
+            # Always include original query first
+            return [query] + alternatives[:3]  # Limit to 3 alternatives
+        except Exception:
+            # On any error, just use original query
+            return [query]
+
+    def load_instructions(self) -> str:
+        """Load instructions from file."""
+        if os.path.exists(self.instructions_file):
+            with open(self.instructions_file, 'r') as f:
+                return f.read()
+        return ""
+
+    def save_instructions(self, text: str):
+        """Save instructions to file."""
+        with open(self.instructions_file, 'w') as f:
+            f.write(text)
+
+    def add_instruction(self, text: str):
+        """Append a new instruction."""
+        current = self.load_instructions()
+        if current:
+            new_text = f"{current}\n{text}"
+        else:
+            new_text = text
+        self.save_instructions(new_text)
+
+    def _get_embedding(self, text: str) -> np.ndarray:
+        resp = self.client.embeddings.create(input=text, model=self.embedding_model)
         return np.array(resp.data[0].embedding)
-
-    def _lsh_hash(self, vector):
-        """Project high-dim vector to low-dim binary string."""
-        dot_product = np.dot(vector, self.projection_matrix)
-        binary_str = "".join(['1' if x > 0 else '0' for x in dot_product])
-        return binary_str
 
     def remember(self, text: str, metadata: Dict = None):
         """
-        Write-Through Strategy: Saves to Disk (L2) AND promotes to RAM (L1).
+        Store a memory in L2 (HNSW index) and promote to L1 (cache).
         """
         vector = self._get_embedding(text)
-        bucket_id = self._lsh_hash(vector)
-        filename = os.path.join(self.storage_dir, f"bucket_{bucket_id}.json")
 
         entry = {
             "text": text,
@@ -110,82 +230,118 @@ class SemanticMemory:
             "metadata": metadata or {}
         }
 
-        # 1. Save to L2 (Disk)
-        current_data = []
-        if os.path.exists(filename):
-            with open(filename, 'r') as f:
-                current_data = json.load(f)
-        
-        # Simple deduplication
-        if not any(d['text'] == text for d in current_data):
-            current_data.append(entry)
-            with open(filename, 'w') as f:
-                json.dump(current_data, f)
-            msg = f"Persisted to bucket_{bucket_id}.json"
-        else:
-            msg = "Memory already exists on disk."
+        # Add to HNSW index (L2)
+        entry_id, is_new = self.vector_index.add(text, vector, metadata)
 
-        # 2. Promote to L1 (RAM)
-        # If we just learned it, we assume it's 'Hot'
+        if is_new:
+            self.vector_index.save()
+            msg = f"Stored in HNSW index (id={entry_id})"
+        else:
+            msg = "Memory already exists."
+
+        # Promote to L1 (RAM cache)
         if entry not in self.local_cache:
-            self.local_cache.appendleft(entry)
+            self.local_cache.add(entry)
             msg += " & Promoted to Hot Cache."
-            
+
         return msg
 
-    def recall(self, query: str, limit=3, threshold=0.82):
-            query_vec = self._get_embedding(query)
-            logs = []
+    def _persist_hot_items(self):
+        """Save frequently accessed L1 items to L2 for long-term storage."""
+        items = self.local_cache.get_pending_persist()
+        for item in items:
+            text = item['text']
+            vector = np.array(item['vector'])
+            metadata = item.get('metadata', {})
 
-            # --- TIER 1: Check Smart Cache ---
-            # We scan ALL items in both segments of the cache
-            all_cache_items = list(self.local_cache.protected.values()) + list(self.local_cache.probation.values())
-            
-            l1_hits = []
+            # Add to HNSW if not already there
+            _, is_new = self.vector_index.add(text, vector, metadata)
+            if is_new:
+                self.vector_index.save()
+
+    def recall(
+        self,
+        query: str,
+        limit: int = 3,
+        threshold: float = 0.40,
+        expand_query: bool = True,
+    ):
+        """
+        Retrieve relevant memories using semantic search.
+
+        Args:
+            query: The search query
+            limit: Maximum number of results to return
+            threshold: Minimum similarity score (0-1)
+            expand_query: If True, use LLM to generate alternative query phrasings
+        """
+        logs = []
+
+        # --- Query Expansion ---
+        if expand_query:
+            queries = self._expand_query(query)
+            if len(queries) > 1:
+                logs.append(f"🔍 Expanded to {len(queries)} queries")
+        else:
+            queries = [query]
+
+        # Get embeddings for all query variants
+        query_vecs = [self._get_embedding(q) for q in queries]
+
+        # --- TIER 1: Check Smart Cache ---
+        all_cache_items = list(self.local_cache)
+
+        l1_hits = []
+        seen_texts = set()
+        for query_vec in query_vecs:
             for item in all_cache_items:
+                if item['text'] in seen_texts:
+                    continue
                 score = np.dot(query_vec, np.array(item['vector']))
                 if score > threshold:
+                    seen_texts.add(item['text'])
                     l1_hits.append((score, item))
-            
-            if l1_hits:
-                l1_hits.sort(key=lambda x: x[0], reverse=True)
-                best_hit = l1_hits[0][1]
-                
-                # CRITICAL: Trigger the "Reset/Promote" logic on the SmartCache
-                # We "get" it to tell the cache "This was used!"
-                _, status = self.local_cache.get(best_hit['text'])
-                
-                logs.append(f"⚡ L1 HIT ({status}) | Conf: {l1_hits[0][0]:.2f}")
-                return [x[1]['text'] for x in l1_hits[:limit]], logs
 
-            # --- TIER 2: Check L2 (Disk) ---
-            logs.append("🐢 L1 Miss... Searching Disk...")
-            bucket_id = self._lsh_hash(query_vec)
-            filename = os.path.join(self.storage_dir, f"bucket_{bucket_id}.json")
+        if l1_hits:
+            l1_hits.sort(key=lambda x: x[0], reverse=True)
+            best_hit = l1_hits[0][1]
 
-            if not os.path.exists(filename): return [], logs
+            # Trigger the "Reset/Promote" logic on the SmartCache
+            _, status, _ = self.local_cache.get(best_hit['text'])
 
-            with open(filename, 'r') as f: data = json.load(f)
+            logs.append(f"⚡ L1 HIT ({status}) | Conf: {l1_hits[0][0]:.2f}")
 
-            l2_results = []
-            for item in data:
-                score = np.dot(query_vec, np.array(item['vector']))
-                l2_results.append((score, item))
-                
-            l2_results.sort(key=lambda x: x[0], reverse=True)
-            top_results = l2_results[:limit]
-            
-            # --- PROMOTION ---
-            promoted = 0
-            for score, item in top_results:
-                if score > threshold:
-                    # Add to Smart Cache (Starts in Probation)
-                    self.local_cache.add(item)
-                    promoted += 1
-            
-            if promoted: logs.append(f"🔼 Promoted {promoted} to Probation.")
+            # Auto-persist frequently accessed items to L2
+            self._persist_hot_items()
 
-            return [x[1]['text'] for x in top_results], logs
+            return [x[1]['text'] for x in l1_hits[:limit]], logs
+
+        # --- TIER 2: Search HNSW Index ---
+        logs.append("🔍 L1 Miss... Searching HNSW index...")
+
+        # Search HNSW with all query variants
+        results = self.vector_index.search(
+            query_vectors=query_vecs,
+            k=limit * 2,  # Get extra candidates for filtering
+            threshold=threshold,
+        )
+
+        if not results:
+            return [], logs
+
+        # Limit results
+        top_results = results[:limit]
+
+        # Promote to L1 cache
+        promoted = 0
+        for score, item in top_results:
+            self.local_cache.add(item)
+            promoted += 1
+
+        if promoted:
+            logs.append(f"🔼 Promoted {promoted} to Probation.")
+
+        return [item['text'] for _, item in top_results], logs
 
     def bulk_learn_pdf(self, pdf_file, chunk_size=500):
         """Reads PDF, chunks it, and saves to L2."""
@@ -193,60 +349,157 @@ class SemanticMemory:
         text = ""
         for page in reader.pages:
             content = page.extract_text()
-            if content: text += content + "\n"
-        
+            if content:
+                text += content + "\n"
+
         chunks = []
         for i in range(0, len(text), chunk_size):
             chunk = text[i : i + chunk_size]
-            if len(chunk.strip()) > 20: 
+            if len(chunk.strip()) > 20:
                 chunks.append(chunk)
-        
+
         count = 0
         for c in chunks:
             self.remember(c, metadata={"source": "pdf_upload"})
             count += 1
         return count
 
-    def import_bucket(self, uploaded_file):
-        """Merges an external JSON bucket."""
-        new_data = json.load(uploaded_file)
-        if not new_data: return "Empty bucket."
-        
-        # Re-hash to verify destination
-        sample_vec = np.array(new_data[0]['vector'])
-        bucket_id = self._lsh_hash(sample_vec)
-        target_file = os.path.join(self.storage_dir, f"bucket_{bucket_id}.json")
+    def import_memories(self, entries: List[Dict]) -> int:
+        """
+        Import memory entries (e.g., from a JSON export).
 
-        existing_data = []
-        if os.path.exists(target_file):
-            with open(target_file, 'r') as f:
-                existing_data = json.load(f)
-        
-        # Merge
-        existing_texts = {d['text'] for d in existing_data}
-        added_count = 0
-        for entry in new_data:
-            if entry['text'] not in existing_texts:
-                existing_data.append(entry)
-                added_count += 1
-        
-        with open(target_file, 'w') as f:
-            json.dump(existing_data, f)
-            
-        return f"Merged {added_count} items into bucket_{bucket_id}."
+        Args:
+            entries: List of dicts with 'text', 'vector', and optional 'metadata'
 
-    def chat_with_memory(self, user_query, system_prompt="You are a helpful assistant."):
-        """Agentic Wrapper."""
+        Returns:
+            Number of new entries added
+        """
+        added = 0
+        for entry in entries:
+            text = entry.get('text', '')
+            vector = np.array(entry.get('vector', []))
+            metadata = entry.get('metadata', {})
+
+            if text and len(vector) == self.embedding_dim:
+                _, is_new = self.vector_index.add(text, vector, metadata)
+                if is_new:
+                    added += 1
+
+        if added:
+            self.vector_index.save()
+
+        return added
+
+    def save_thread_to_memory(self, messages: List[Dict], thread_name: str = "thread"):
+        """
+        Save a conversation thread to L2 memory.
+        Creates a summary of the conversation for semantic retrieval.
+        """
+        if not messages:
+            return 0
+
+        # Build conversation text
+        conversation_parts = []
+        for msg in messages:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            # Strip system logs and citations from assistant messages
+            if role == "assistant":
+                # Remove everything after **System Logs:** or **Retrieved Context:**
+                if "**System Logs:**" in content:
+                    content = content.split("**System Logs:**")[0].strip()
+                if "**Retrieved Context:**" in content:
+                    content = content.split("**Retrieved Context:**")[0].strip()
+            conversation_parts.append(f"{role.upper()}: {content}")
+
+        full_conversation = "\n\n".join(conversation_parts)
+
+        # Chunk long conversations (max ~1500 chars per chunk for good embeddings)
+        chunk_size = 1500
+        chunks = []
+        if len(full_conversation) <= chunk_size:
+            chunks.append(full_conversation)
+        else:
+            # Split by message boundaries when possible
+            current_chunk = ""
+            for part in conversation_parts:
+                if len(current_chunk) + len(part) > chunk_size and current_chunk:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = part
+                else:
+                    current_chunk += "\n\n" + part if current_chunk else part
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+
+        # Save each chunk to L2
+        count = 0
+        for chunk in chunks:
+            self.remember(chunk, metadata={"source": "thread", "thread_name": thread_name})
+            count += 1
+
+        return count
+
+    def get_stats(self) -> Dict:
+        """Get memory statistics."""
+        return {
+            "l2_memories": self.vector_index.get_entry_count(),
+            "l1_cache_size": len(list(self.local_cache)),
+            "instructions_length": len(self.load_instructions()),
+        }
+
+    def chat_with_memory(
+        self,
+        user_query: str,
+        previous_response_id: Optional[str] = None,
+        model: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
+    ):
+        """
+        Agentic Wrapper using Responses API.
+
+        Args:
+            user_query: The user's question
+            previous_response_id: For conversation continuity
+            model: Override the default chat model (gpt-5.1, gpt-4.1)
+            reasoning_effort: For reasoning models: "low", "medium", "high"
+
+        Returns:
+            Tuple of (response_text, response_id, memories, logs)
+        """
         memories, logs = self.recall(user_query)
-        context_block = "\n".join([f"- {m}" for m in memories])
-        
-        full_system = f"{system_prompt}\n\nRELEVANT MEMORY:\n{context_block}"
-        
-        response = self.client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": full_system},
-                {"role": "user", "content": user_query}
-            ]
-        )
-        return response.choices[0].message.content, memories, logs
+
+        # Build instructions from file
+        instructions = self.load_instructions() or "You are a helpful assistant."
+
+        # Build input with memory context
+        if memories:
+            context_block = "\n".join([f"- {m}" for m in memories])
+            input_text = f"Relevant context from memory:\n{context_block}\n\nUser question: {user_query}"
+        else:
+            input_text = user_query
+
+        # Use provided model or fall back to instance default
+        use_model = model or self.chat_model
+        use_reasoning = reasoning_effort or self.reasoning_effort
+
+        # Build base parameters
+        create_params: Dict = {
+            "model": use_model,
+            "instructions": instructions,
+            "input": input_text,
+        }
+
+        if previous_response_id:
+            create_params["previous_response_id"] = previous_response_id
+
+        # Reasoning models (gpt-5.1, o1, o3) require special handling
+        if use_model in ("gpt-5.1", "o1", "o3"):
+            # Reasoning models don't support temperature
+            # Use reasoning parameter for effort level
+            create_params["reasoning"] = {"effort": use_reasoning}
+        else:
+            # Standard models support temperature
+            create_params["temperature"] = 0.7
+
+        response = self.client.responses.create(**create_params)  # type: ignore
+        return response.output_text, response.id, memories, logs

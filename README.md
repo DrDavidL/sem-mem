@@ -1,73 +1,326 @@
 # Sem-Mem: Tiered Semantic Memory for AI Agents
 
-**Sem-Mem** is a local, privacy-first memory layer for OpenAI-based agents. It implements a **Distributed Hash Table (DHT)** architecture using Locality-Sensitive Hashing (LSH) to organize memories by semantic meaning rather than keywords.
+**Sem-Mem** is a local, privacy-first memory layer for OpenAI-based agents. It implements a **Tiered Memory** architecture using HNSW (Hierarchical Navigable Small World) indexing for fast approximate nearest-neighbor search with O(log n) complexity.
 
 It features a **Tiered "Smart Cache"** system (Segmented LRU) that mimics human memory:
 1.  **L1 (Hot/RAM):** Instant access to recently used or high-frequency data (Segmented into "Probation" and "Protected" tiers).
-2.  **L2 (Cold/Disk):** Permanent storage of guidelines and facts, organized into "Buckets" based on semantic clusters.
+2.  **L2 (Cold/Disk):** Permanent HNSW index for semantic search across all stored memories.
 
-## 🚀 Features
+## Features
 
 * **Zero-Latency "Hot" Recall:** Uses a Segmented LRU cache to keep relevant context in RAM.
 * **Privacy-First:** Data stays on your local machine. Only query vectors are sent to OpenAI.
-* **Mergeable Minds:** Knowledge is stored in JSON "Buckets" (e.g., `bucket_101.json`). You can share a specific topic bucket with a colleague without sharing your entire database.
+* **HNSW Index:** O(log n) approximate nearest neighbor search using hnswlib.
+* **Query Expansion:** LLM-powered alternative query generation for better recall.
+* **Thread-Safe:** Concurrent access support with RLock synchronization.
+* **Model Selection:** Support for reasoning models (gpt-5.1, o1, o3) with configurable reasoning effort.
 * **PDF Ingestion:** "Read" clinical guidelines or papers and auto-chunk them into long-term memory.
 * **Memory Atlas:** A 2D visualization (PCA) of your knowledge graph to verify semantic clustering.
+* **FastAPI Server:** RESTful API for programmatic access and microservice deployment.
+* **Docker Support:** Containerized deployment with docker-compose.
 
-## 🛠️ Installation
+## Installation
 
-1.  **Clone or Download** this repository.
-2.  **Create a Virtual Environment** (recommended):
-    ```bash
-    python -m venv venv
-    source venv/bin/activate  # On Windows: venv\Scripts\activate
-    ```
-3.  **Install Dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+### From Source (Development)
 
-## 🏃‍♂️ Usage
+```bash
+git clone https://github.com/david/sem-mem.git
+cd sem-mem
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-### 1. Run the Chat App
-The project includes a Streamlit interface for chatting, training, and visualizing the memory.
+# Core package only
+pip install -e .
+
+# With Streamlit app
+pip install -e ".[app]"
+
+# With FastAPI server
+pip install -e ".[server]"
+
+# Everything (app + server + dev tools)
+pip install -e ".[all]"
+```
+
+### Package Installation
+
+```bash
+# Core package only
+pip install sem-mem
+
+# With Streamlit app
+pip install "sem-mem[app]"
+
+# With FastAPI server
+pip install "sem-mem[server]"
+```
+
+## Configuration
+
+Sem-Mem supports multiple configuration sources (in priority order):
+
+1. **Environment variables** (highest priority)
+2. **`.env` file** in project root
+3. **Streamlit secrets** (`.streamlit/secrets.toml`)
+
+### Required Configuration
+
+Create a `.env` file in your project root:
+
+```bash
+# Copy from .env.example
+cp .env.example .env
+```
+
+```env
+# Required
+OPENAI_API_KEY=sk-...
+
+# Optional - Model Selection
+CHAT_MODEL=gpt-5.1              # Options: gpt-5.1 (reasoning), gpt-4.1
+REASONING_EFFORT=low            # For reasoning models: low, medium, high
+
+# Optional - Storage
+MEMORY_STORAGE_DIR=./local_memory
+CACHE_SIZE=20
+EMBEDDING_MODEL=text-embedding-3-small
+
+# Optional - API Server
+SEMMEM_API_URL=http://localhost:8000
+```
+
+## Usage
+
+### Option 1: Streamlit App (Standalone)
+
+The simplest way to use Sem-Mem with a full UI:
 
 ```bash
 streamlit run app.py
-````
+```
 
-### 2\. How to "Teach" the AI
+### Option 2: FastAPI Server + API Client
 
-  * **Fact-Based:** Type `Remember: The code for the break room is 1234.` in the chat.
-  * **Document-Based:** Use the **Sidebar \> Digest Knowledge** tool to upload a PDF (e.g., a medical guideline).
+For microservice deployment or programmatic access:
 
-### 3\. The "Smart Cache" in Action
+```bash
+# Terminal 1: Start the API server
+uvicorn server:app --reload
 
-Watch the Sidebar to see the lifecycle of a memory:
+# Terminal 2: Run the API client UI
+streamlit run app_api.py
+```
 
-1.  **Ingestion:** New data goes to **L2 (Disk)**.
-2.  **First Query:** "What is the protocol for X?" -\> System scans disk (slower) -\> Promotes result to **Probation**.
-3.  **Second Query:** "What is the dosage?" -\> System hits **Probation** (Instant).
-4.  **Frequent Use:** If used again, the memory moves to **Protected (VIP)**, ensuring it stays in RAM even as you switch topics.
+### Option 3: Docker Deployment
 
-## 📂 Project Structure
+```bash
+# Build and run both services
+docker-compose up --build
+
+# Access:
+# - API Server: http://localhost:8000
+# - Streamlit UI: http://localhost:8501
+```
+
+### Option 4: Python API
+
+#### MemoryChat Class (Recommended)
+
+```python
+from sem_mem import SemanticMemory
+from sem_mem.decorators import MemoryChat
+
+memory = SemanticMemory(api_key="sk-...")
+chat = MemoryChat(memory)
+
+# Stateful conversation with automatic RAG
+response = chat.send("Hello, I'm a physician.")
+response = chat.send("What's my profession?")  # Remembers context
+
+# Memory operations
+chat.remember("Patient prefers morning appointments")
+chat.add_instruction("Always be concise")
+chat.save_thread()  # Save conversation to L2
+
+chat.new_thread()  # Fresh conversation, same memory
+```
+
+#### Decorators
+
+```python
+from sem_mem import SemanticMemory, with_memory, with_rag
+
+memory = SemanticMemory(api_key="sk-...")
+
+# Full memory integration
+@with_memory(memory)
+def chat(user_input: str, context: str = "", instructions: str = "", **_) -> str:
+    # context = retrieved memories, instructions = from instructions.txt
+    return my_llm(f"{instructions}\n\n{context}\n\nUser: {user_input}")
+
+# RAG only (just retrieval)
+@with_rag(memory)
+def simple_chat(user_input: str, context: str = "", **_) -> str:
+    return my_llm(f"{context}\n\n{user_input}")
+```
+
+#### Direct API
+
+```python
+from sem_mem import SemanticMemory
+
+memory = SemanticMemory(
+    api_key="sk-...",
+    chat_model="gpt-5.1",           # or "gpt-4.1"
+    reasoning_effort="medium",       # for reasoning models
+)
+
+# Store facts
+memory.remember("The patient is allergic to penicillin")
+memory.add_instruction("I am an informatics physician")
+
+# Query with RAG
+response, resp_id, mems, logs = memory.chat_with_memory(
+    "What allergies should I check?",
+    previous_response_id=prev_id  # For conversation continuity
+)
+```
+
+## Model Selection
+
+Sem-Mem supports OpenAI's latest models:
+
+| Model | Type | Features |
+|-------|------|----------|
+| `gpt-5.1` | Reasoning (default) | Extended thinking, `reasoning_effort` parameter |
+| `gpt-4.1` | Standard | Temperature control, faster responses |
+
+### Reasoning Effort (for gpt-5.1, o1, o3)
+
+- **low**: Quick responses, minimal reasoning
+- **medium**: Balanced reasoning depth
+- **high**: Thorough analysis, slower but more accurate
+
+Change models via:
+- **UI**: Sidebar model selector
+- **API**: `PUT /model?model=gpt-4.1`
+- **Config**: `CHAT_MODEL=gpt-4.1` in `.env`
+- **Code**: `SemanticMemory(chat_model="gpt-4.1")`
+
+## Chat Commands
+
+In the Streamlit chat interface:
+
+- **Regular text**: Query with RAG from semantic memory
+- `remember: <text>`: Add fact to semantic memory (L2)
+- `instruct: <text>`: Add permanent instruction (persisted to instructions.txt)
+
+## API Endpoints
+
+When running the FastAPI server:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/chat` | POST | Chat with RAG (supports `model`, `reasoning_effort` params) |
+| `/remember` | POST | Store a single memory |
+| `/remember/batch` | POST | Store multiple memories |
+| `/recall` | POST | Retrieve relevant memories |
+| `/instructions` | GET/PUT/POST | Manage system instructions |
+| `/cache` | GET | View L1 cache state |
+| `/stats` | GET | Memory statistics |
+| `/model` | GET/PUT | View/update model configuration |
+| `/upload/pdf` | POST | Ingest PDF document |
+| `/threads/save` | POST | Save conversation to L2 |
+
+API documentation available at `http://localhost:8000/docs` when server is running.
+
+## Project Structure
 
 ```text
 .
 ├── sem_mem/
-│   ├── __init__.py
-│   └── core.py         # The Logic: LSH Hashing, SmartCache, OpenAI Wrapper
-├── local_memory/       # The Data: Auto-generated JSON buckets
-├── app.py              # The UI: Streamlit Frontend
-├── requirements.txt
+│   ├── __init__.py          # Package exports
+│   ├── core.py              # SemanticMemory, SmartCache
+│   ├── async_core.py        # Async version for FastAPI
+│   ├── config.py            # Configuration and secret loading
+│   ├── vector_index.py      # HNSWIndex for L2 storage
+│   └── decorators.py        # @with_memory, @with_rag, MemoryChat
+├── local_memory/            # HNSW index files + instructions.txt
+├── app.py                   # Streamlit standalone app
+├── app_api.py               # Streamlit API client app
+├── server.py                # FastAPI server
+├── Dockerfile
+├── docker-compose.yml
+├── pyproject.toml
 └── README.md
 ```
 
-## 🤝 Collaborative "Mind Merging"
+## Memory Systems
 
-To share knowledge with a colleague using Sem-Mem:
+| Memory Type | Storage | Scope | Eviction | User Update | Auto Update |
+|-------------|---------|-------|----------|-------------|-------------|
+| **Instructions** | `instructions.txt` | All threads | Never | Sidebar editor, `instruct:` cmd | Never |
+| **L1 (Hot Cache)** | RAM (SmartCache) | All threads | LRU | None (automatic) | Promoted from L2 on access |
+| **L2 (Cold Storage)** | HNSW index | All threads | Never | `remember:` cmd, PDF upload | Auto-saved from L1 after 6+ hits |
+| **Thread History** | Session state | Per thread | New thread | None | Automatic on chat |
 
-1.  Go to your `local_memory/` folder.
-2.  Find the bucket corresponding to the topic (use the "Memory Atlas" in the app to identify the bucket ID).
-3.  Send the `bucket_xxxxx.json` file to your colleague.
-4.  They use the **"Merge Bucket"** feature in their sidebar to instantly absorb that specific knowledge domain.    
+### Multi-Session Behavior
+
+**Standalone Streamlit (`app.py`):**
+- **L2 (Disk)**: Shared across all sessions - memories persist and are accessible to everyone
+- **L1 (RAM)**: Isolated per session - each browser tab has its own cache
+- Best for single-user or development use
+
+**FastAPI Server (`server.py` + `app_api.py`):**
+- **Both L1 and L2**: Fully shared across all connected clients
+- Single memory instance serves all API requests
+- Best for multi-user production deployments
+
+For shared memory across multiple users, use the API architecture:
+```bash
+uvicorn server:app --reload    # Shared backend
+streamlit run app_api.py       # Multiple clients can connect
+```
+
+## Migration from LSH
+
+If you have existing data in the old LSH bucket format (`bucket_*.json`), you can migrate to HNSW:
+
+```python
+from sem_mem import migrate_lsh_to_hnsw
+
+# Migrate existing buckets to HNSW index
+count = migrate_lsh_to_hnsw("./local_memory")
+print(f"Migrated {count} memories to HNSW index")
+```
+
+## Development
+
+```bash
+# Setup
+git clone https://github.com/david/sem-mem.git
+cd sem-mem
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[all]"
+
+# Run tests
+pytest
+
+# Lint
+ruff check .
+```
+
+## Technical Details
+
+- **HNSW**: Hierarchical Navigable Small World graph for O(log n) approximate nearest neighbor search
+- **hnswlib**: Lightweight C++ library with Python bindings (ef_construction=200, M=16)
+- **Embeddings**: OpenAI `text-embedding-3-small` (1536 dimensions, configurable)
+- **Query Expansion**: Uses `gpt-4.1-mini` to generate alternative query phrasings
+- **Cache**: Segmented LRU with Protected/Probation tiers
+- **API**: OpenAI Responses API for stateful conversations
+- **Thread Safety**: RLock synchronization for concurrent access
+
+## License
+
+MIT License
