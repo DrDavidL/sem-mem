@@ -19,3 +19,4 @@ pyproject.toml
 .env.example
 
 /
+plan.md

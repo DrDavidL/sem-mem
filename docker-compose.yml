@@ -4,10 +4,22 @@ services:
     ports:
       - "8000:8000"
     environment:
+      # Provider selection (defaults to openai)
+      - SEMMEM_CHAT_PROVIDER=${SEMMEM_CHAT_PROVIDER:-openai}
+      - SEMMEM_EMBEDDING_PROVIDER=${SEMMEM_EMBEDDING_PROVIDER:-openai}
+      # Provider API keys (set the ones you need)
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - AZURE_OPENAI_KEY=${AZURE_OPENAI_KEY:-}
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      # Model configuration
+      - SEMMEM_CHAT_MODEL=${SEMMEM_CHAT_MODEL:-gpt-5.1}
+      - SEMMEM_EMBEDDING_MODEL=${SEMMEM_EMBEDDING_MODEL:-text-embedding-3-small}
+      # Storage configuration
       - MEMORY_STORAGE_DIR=/app/local_memory
-      - CACHE_SIZE=20
-      - EMBEDDING_MODEL=text-embedding-3-small
+      - CACHE_SIZE=${CACHE_SIZE:-20}
     volumes:
       - memory_data:/app/local_memory
     restart: unless-stopped
@@ -38,7 +50,19 @@ services:
     ports:
       - "8502:8502"
     environment:
+      # Provider selection
+      - SEMMEM_CHAT_PROVIDER=${SEMMEM_CHAT_PROVIDER:-openai}
+      - SEMMEM_EMBEDDING_PROVIDER=${SEMMEM_EMBEDDING_PROVIDER:-openai}
+      # Provider API keys
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - AZURE_OPENAI_KEY=${AZURE_OPENAI_KEY:-}
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      # Model configuration
+      - SEMMEM_CHAT_MODEL=${SEMMEM_CHAT_MODEL:-gpt-5.1}
+      - SEMMEM_EMBEDDING_MODEL=${SEMMEM_EMBEDDING_MODEL:-text-embedding-3-small}
     volumes:
       - memory_data:/app/local_memory
       - ./app.py:/app/app.py:ro
@@ -47,5 +71,17 @@ services:
     profiles:
       - standalone
 
+  # Ollama for local inference (optional)
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    profiles:
+      - ollama
+
 volumes:
   memory_data:
+  ollama_data:

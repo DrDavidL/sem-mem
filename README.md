@@ -1,6 +1,6 @@
 # Sem-Mem: Tiered Semantic Memory for AI Agents
 
-> **Drop-in semantic memory for OpenAI agents: local, HNSW-backed storage with auto-memory and RAG out of the box.**
+> **Drop-in semantic memory for AI agents: local, HNSW-backed storage with auto-memory and RAG out of the box. Works with OpenAI, Claude, Gemini, Ollama, and more.**
 
 ## Who It's For
 
@@ -223,6 +223,76 @@ EMBEDDING_MODEL=text-embedding-3-small
 # Optional - API Server
 SEMMEM_API_URL=http://localhost:8000
 ```
+
+## Multi-Provider Support
+
+Sem-Mem supports multiple LLM providers for chat and embeddings. You can mix providers (e.g., Claude for chat, OpenAI for embeddings).
+
+### Available Providers
+
+| Provider | Chat | Embeddings | Tier | Notes |
+|----------|------|------------|------|-------|
+| **OpenAI** | ✅ | ✅ | 1 | Default, full feature support |
+| **Azure OpenAI** | ✅ | ✅ | 1 | Same SDK, deployment names |
+| **Anthropic (Claude)** | ✅ | ❌ | 2 | Pair with OpenAI/Google for embeddings |
+| **Google (Gemini)** | ✅ | ✅ | 2 | text-embedding-004 (768d) |
+| **Ollama** | ✅ | ✅ | 2 | Local inference |
+| **OpenRouter** | ✅ | ❌ | 3 | Multi-model gateway |
+
+### Configuration
+
+Set provider via environment variables:
+
+```bash
+# Chat provider (can be changed anytime)
+SEMMEM_CHAT_PROVIDER=openai   # openai, azure, anthropic, google, ollama, openrouter
+
+# Embedding provider (locked after first use!)
+SEMMEM_EMBEDDING_PROVIDER=openai   # openai, azure, google, ollama
+```
+
+Each provider has its own API key env var. See [.env.example](.env.example) for the full list.
+
+### Example: Claude for Chat, OpenAI for Embeddings
+
+```bash
+SEMMEM_CHAT_PROVIDER=anthropic
+SEMMEM_CHAT_MODEL=claude-sonnet-4-20250514
+ANTHROPIC_API_KEY=sk-ant-...
+
+SEMMEM_EMBEDDING_PROVIDER=openai
+SEMMEM_EMBEDDING_MODEL=text-embedding-3-small
+OPENAI_API_KEY=sk-...
+```
+
+Or in code:
+
+```python
+from sem_mem import SemanticMemory
+
+memory = SemanticMemory(
+    chat_provider="anthropic",
+    embedding_provider="openai",
+)
+```
+
+### Installation
+
+```bash
+# Core (OpenAI + Azure)
+pip install sem-mem
+
+# With specific providers
+pip install "sem-mem[anthropic]"   # Anthropic/Claude
+pip install "sem-mem[google]"      # Google/Gemini
+pip install "sem-mem[all-providers]"  # All providers
+```
+
+### Embedding Provider Lock
+
+**Important:** Once you create an index with a specific embedding provider/model, it cannot be changed without deleting or migrating the index. This is because different embedding models produce vectors with different dimensions and semantics.
+
+If you try to use a different embedding provider with an existing index, you'll get an `EmbeddingMismatchError` with instructions for how to proceed.
 
 ## Usage
 

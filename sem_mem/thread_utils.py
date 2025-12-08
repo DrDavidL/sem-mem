@@ -12,8 +12,7 @@ This module just provides helpers for:
 """
 
 import json
-from typing import List, Dict, Optional
-from openai import OpenAI
+from typing import List, Dict, Optional, TYPE_CHECKING, Union
 
 from .config import (
     AUTO_THREAD_RENAME_MODEL,
@@ -27,10 +26,15 @@ from .config import (
     get_api_key,
 )
 
+if TYPE_CHECKING:
+    from openai import OpenAI
+    from .providers import BaseChatProvider
+
 
 def generate_thread_title(
     messages: List[Dict],
-    client: Optional[OpenAI] = None,
+    chat_provider: Optional["BaseChatProvider"] = None,
+    client: Optional["OpenAI"] = None,
     model: str = AUTO_THREAD_RENAME_MODEL,
     max_words: int = AUTO_THREAD_RENAME_MAX_WORDS,
 ) -> str:
@@ -39,7 +43,8 @@ def generate_thread_title(
 
     Args:
         messages: List of message dicts with 'role' and 'content' keys
-        client: OpenAI client (created if not provided)
+        chat_provider: Chat provider to use (preferred)
+        client: Legacy OpenAI client (for backward compat)
         model: Model to use for title generation
         max_words: Maximum words in the generated title
 
@@ -59,13 +64,6 @@ def generate_thread_title(
     if not messages:
         return ""
 
-    # Create client if not provided
-    if client is None:
-        api_key = get_api_key()
-        if not api_key:
-            return ""
-        client = OpenAI(api_key=api_key)
-
     # Build conversation summary for the model
     conversation_text = _format_messages_for_title(messages)
 
@@ -81,16 +79,36 @@ Rules:
 Respond with ONLY the title, nothing else."""
 
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Generate a title for this conversation:\n\n{conversation_text}"}
-            ],
-            temperature=0.3,
-            max_tokens=50,
-        )
-        title = response.choices[0].message.content or ""
+        # Use provider if available
+        if chat_provider is not None:
+            response = chat_provider.chat(
+                messages=[{"role": "user", "content": f"Generate a title for this conversation:\n\n{conversation_text}"}],
+                model=model,
+                instructions=system_prompt,
+                temperature=0.3,
+                max_tokens=50,
+            )
+            title = response.text or ""
+        else:
+            # Legacy path: create client if needed
+            if client is None:
+                from openai import OpenAI
+                api_key = get_api_key()
+                if not api_key:
+                    return ""
+                client = OpenAI(api_key=api_key)
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Generate a title for this conversation:\n\n{conversation_text}"}
+                ],
+                temperature=0.3,
+                max_tokens=50,
+            )
+            title = response.choices[0].message.content or ""
+
         # Clean up: remove quotes, extra whitespace
         title = title.strip().strip('"\'')
         return title
@@ -262,7 +280,8 @@ Be brief but complete. Focus on what would be useful context for future conversa
 
 def summarize_conversation_window(
     messages: List[Dict],
-    client: Optional[OpenAI] = None,
+    chat_provider: Optional["BaseChatProvider"] = None,
+    client: Optional["OpenAI"] = None,
     model: str = CONVERSATION_SUMMARY_MODEL,
     max_chars: int = CONVERSATION_SUMMARY_MAX_CHARS,
 ) -> str:
@@ -271,7 +290,8 @@ def summarize_conversation_window(
 
     Args:
         messages: List of message dicts to summarize (a window/slice)
-        client: OpenAI client (created if not provided)
+        chat_provider: Chat provider to use (preferred)
+        client: Legacy OpenAI client (for backward compat)
         model: Model to use for summarization
         max_chars: Maximum characters of conversation to include in prompt
 
@@ -290,13 +310,6 @@ def summarize_conversation_window(
     if not messages:
         return ""
 
-    # Create client if not provided
-    if client is None:
-        api_key = get_api_key()
-        if not api_key:
-            return ""
-        client = OpenAI(api_key=api_key)
-
     # Format messages for summarization (with cleanup)
     conversation_text = _format_messages_for_summary(messages, max_chars)
 
@@ -304,16 +317,36 @@ def summarize_conversation_window(
         return ""
 
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": CONVERSATION_SUMMARY_PROMPT},
-                {"role": "user", "content": f"Summarize this conversation segment:\n\n{conversation_text}"}
-            ],
-            temperature=0.3,
-            max_tokens=1000,
-        )
-        summary = response.choices[0].message.content or ""
+        # Use provider if available
+        if chat_provider is not None:
+            response = chat_provider.chat(
+                messages=[{"role": "user", "content": f"Summarize this conversation segment:\n\n{conversation_text}"}],
+                model=model,
+                instructions=CONVERSATION_SUMMARY_PROMPT,
+                temperature=0.3,
+                max_tokens=1000,
+            )
+            summary = response.text or ""
+        else:
+            # Legacy path: create client if needed
+            if client is None:
+                from openai import OpenAI
+                api_key = get_api_key()
+                if not api_key:
+                    return ""
+                client = OpenAI(api_key=api_key)
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": CONVERSATION_SUMMARY_PROMPT},
+                    {"role": "user", "content": f"Summarize this conversation segment:\n\n{conversation_text}"}
+                ],
+                temperature=0.3,
+                max_tokens=1000,
+            )
+            summary = response.choices[0].message.content or ""
+
         return summary.strip()
     except Exception:
         return ""
@@ -425,7 +458,8 @@ Be brief but complete. This is the final record of this conversation."""
 
 def summarize_deleted_thread(
     messages: List[Dict],
-    client: Optional[OpenAI] = None,
+    chat_provider: Optional["BaseChatProvider"] = None,
+    client: Optional["OpenAI"] = None,
     model: str = FAREWELL_SUMMARY_MODEL,
     max_chars: int = FAREWELL_SUMMARY_MAX_CHARS,
 ) -> str:
@@ -437,7 +471,8 @@ def summarize_deleted_thread(
 
     Args:
         messages: Complete list of message dicts from the thread
-        client: OpenAI client (created if not provided)
+        chat_provider: Chat provider to use (preferred)
+        client: Legacy OpenAI client (for backward compat)
         model: Model to use for summarization
         max_chars: Maximum characters of conversation to include in prompt
 
@@ -457,13 +492,6 @@ def summarize_deleted_thread(
     if not messages or len(messages) < 2:
         return ""
 
-    # Create client if not provided
-    if client is None:
-        api_key = get_api_key()
-        if not api_key:
-            return ""
-        client = OpenAI(api_key=api_key)
-
     # Format messages for summarization (reuse existing helper)
     conversation_text = _format_messages_for_summary(messages, max_chars)
 
@@ -471,16 +499,36 @@ def summarize_deleted_thread(
         return ""
 
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": FAREWELL_SUMMARY_PROMPT},
-                {"role": "user", "content": f"Summarize this conversation before deletion:\n\n{conversation_text}"}
-            ],
-            temperature=0.3,
-            max_tokens=1000,
-        )
-        summary = response.choices[0].message.content or ""
+        # Use provider if available
+        if chat_provider is not None:
+            response = chat_provider.chat(
+                messages=[{"role": "user", "content": f"Summarize this conversation before deletion:\n\n{conversation_text}"}],
+                model=model,
+                instructions=FAREWELL_SUMMARY_PROMPT,
+                temperature=0.3,
+                max_tokens=1000,
+            )
+            summary = response.text or ""
+        else:
+            # Legacy path: create client if needed
+            if client is None:
+                from openai import OpenAI
+                api_key = get_api_key()
+                if not api_key:
+                    return ""
+                client = OpenAI(api_key=api_key)
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": FAREWELL_SUMMARY_PROMPT},
+                    {"role": "user", "content": f"Summarize this conversation before deletion:\n\n{conversation_text}"}
+                ],
+                temperature=0.3,
+                max_tokens=1000,
+            )
+            summary = response.choices[0].message.content or ""
+
         return summary.strip()
     except Exception:
         return ""

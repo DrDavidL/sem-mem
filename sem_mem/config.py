@@ -6,11 +6,38 @@ Supports multiple secret sources with priority:
 2. .env file in project root
 3. Streamlit secrets (for Streamlit apps)
 4. Interactive prompt (lowest priority, optional)
+
+Provider Configuration:
+- SEMMEM_CHAT_PROVIDER: Chat provider (openai, azure, anthropic, google, ollama, openrouter)
+- SEMMEM_EMBEDDING_PROVIDER: Embedding provider (openai, azure, google, ollama)
+- Provider-specific keys: OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, etc.
 """
 
 import os
 from pathlib import Path
 from typing import Optional, Literal
+
+# =============================================================================
+# Provider Configuration
+# =============================================================================
+
+# Default providers
+DEFAULT_CHAT_PROVIDER = "openai"
+DEFAULT_EMBEDDING_PROVIDER = "openai"
+
+# Provider-specific environment variable names for API keys
+PROVIDER_API_KEY_ENV_VARS = {
+    "openai": "OPENAI_API_KEY",
+    "azure": "AZURE_OPENAI_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "ollama": None,  # Ollama doesn't require an API key
+}
+
+# =============================================================================
+# Chat Models (OpenAI-specific, other providers have their own model handling)
+# =============================================================================
 
 # Available chat models
 CHAT_MODELS = {
@@ -81,13 +108,14 @@ def _get_streamlit_secret(key: str) -> Optional[str]:
 def get_api_key(
     api_key: Optional[str] = None,
     prompt_if_missing: bool = False,
+    provider: str = "openai",
 ) -> Optional[str]:
     """
-    Get OpenAI API key from various sources.
+    Get API key for a provider from various sources.
 
     Priority:
     1. Passed api_key argument
-    2. OPENAI_API_KEY environment variable
+    2. Provider-specific environment variable (e.g., OPENAI_API_KEY, ANTHROPIC_API_KEY)
     3. .env file
     4. Streamlit secrets
     5. Interactive prompt (if prompt_if_missing=True)
@@ -95,6 +123,7 @@ def get_api_key(
     Args:
         api_key: Explicit API key (highest priority)
         prompt_if_missing: If True, prompt user interactively
+        provider: Provider name to get key for (default: "openai")
 
     Returns:
         API key string or None
@@ -106,22 +135,44 @@ def get_api_key(
     # 2. Load .env file
     _load_dotenv()
 
+    # Get the environment variable name for this provider
+    env_var = PROVIDER_API_KEY_ENV_VARS.get(provider.lower(), f"{provider.upper()}_API_KEY")
+    if env_var is None:
+        # Provider doesn't need an API key (e.g., Ollama)
+        return None
+
     # 3. Environment variable
-    env_key = os.getenv("OPENAI_API_KEY")
+    env_key = os.getenv(env_var)
     if env_key:
         return env_key
 
     # 4. Streamlit secrets
-    st_key = _get_streamlit_secret("OPENAI_API_KEY")
+    st_key = _get_streamlit_secret(env_var)
     if st_key:
         return st_key
 
     # 5. Interactive prompt
     if prompt_if_missing:
         import getpass
-        return getpass.getpass("Enter OpenAI API Key: ")
+        return getpass.getpass(f"Enter {provider} API Key: ")
 
     return None
+
+
+def get_provider_api_key(provider: str, api_key: Optional[str] = None) -> Optional[str]:
+    """
+    Get API key for a specific provider.
+
+    Convenience function that uses get_api_key with provider-specific defaults.
+
+    Args:
+        provider: Provider name ("openai", "anthropic", "google", etc.)
+        api_key: Explicit API key (overrides env vars)
+
+    Returns:
+        API key string or None
+    """
+    return get_api_key(api_key=api_key, provider=provider)
 
 
 def get_config() -> dict:
@@ -133,24 +184,76 @@ def get_config() -> dict:
     """
     _load_dotenv()
 
-    chat_model = os.getenv("CHAT_MODEL", DEFAULT_CHAT_MODEL)
+    # Provider configuration
+    chat_provider = os.getenv("SEMMEM_CHAT_PROVIDER", DEFAULT_CHAT_PROVIDER)
+    embedding_provider = os.getenv("SEMMEM_EMBEDDING_PROVIDER", DEFAULT_EMBEDDING_PROVIDER)
+
+    # Model configuration
+    chat_model = os.getenv("SEMMEM_CHAT_MODEL", os.getenv("CHAT_MODEL", DEFAULT_CHAT_MODEL))
+    embedding_model = os.getenv("SEMMEM_EMBEDDING_MODEL", os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"))
     reasoning_effort = os.getenv("REASONING_EFFORT", "low")
 
-    # Validate
-    if chat_model not in CHAT_MODELS:
-        chat_model = DEFAULT_CHAT_MODEL
+    # Validate reasoning effort
     if reasoning_effort not in REASONING_EFFORTS:
         reasoning_effort = "low"
 
     return {
-        "api_key": get_api_key(),
+        # Provider settings
+        "chat_provider": chat_provider,
+        "embedding_provider": embedding_provider,
+
+        # API keys (per provider)
+        "api_key": get_api_key(provider=chat_provider),  # Legacy, for backward compat
+        "chat_api_key": get_api_key(provider=chat_provider),
+        "embedding_api_key": get_api_key(provider=embedding_provider),
+
+        # Model settings
+        "chat_model": chat_model,
+        "embedding_model": embedding_model,
+        "reasoning_effort": reasoning_effort,
+
+        # Storage settings
         "storage_dir": os.getenv("MEMORY_STORAGE_DIR", "./local_memory"),
         "cache_size": int(os.getenv("CACHE_SIZE", "20")),
-        "embedding_model": os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
-        "chat_model": chat_model,
-        "reasoning_effort": reasoning_effort,
+
+        # API server settings
         "api_url": os.getenv("SEMMEM_API_URL", "http://localhost:8000"),
+
+        # Provider-specific settings
+        "provider_kwargs": get_provider_kwargs(),
     }
+
+
+def get_provider_kwargs() -> dict:
+    """
+    Get provider-specific configuration from environment variables.
+
+    Returns:
+        Dict with provider-specific settings (azure_endpoint, ollama_base_url, etc.)
+    """
+    _load_dotenv()
+
+    kwargs = {}
+
+    # Azure OpenAI settings
+    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    if azure_endpoint:
+        kwargs["azure_endpoint"] = azure_endpoint
+    azure_api_version = os.getenv("AZURE_API_VERSION", "2024-02-01")
+    if azure_api_version:
+        kwargs["azure_api_version"] = azure_api_version
+
+    # Ollama settings
+    ollama_base_url = os.getenv("OLLAMA_BASE_URL")
+    if ollama_base_url:
+        kwargs["ollama_base_url"] = ollama_base_url
+
+    # OpenRouter settings
+    openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    if openrouter_base_url:
+        kwargs["openrouter_base_url"] = openrouter_base_url
+
+    return kwargs
 
 
 def get_model_config(model: str) -> dict:

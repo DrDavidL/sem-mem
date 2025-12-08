@@ -2,12 +2,27 @@ import os
 import threading
 from datetime import datetime
 import numpy as np
-from openai import OpenAI
 from collections import OrderedDict
 from pypdf import PdfReader
-from typing import List, Dict, Optional
-from .config import QUERY_EXPANSION_MODEL
+from typing import List, Dict, Optional, TYPE_CHECKING
+
+from .config import (
+    QUERY_EXPANSION_MODEL,
+    DEFAULT_CHAT_PROVIDER,
+    DEFAULT_EMBEDDING_PROVIDER,
+    get_api_key,
+    get_provider_kwargs,
+)
 from .vector_index import HNSWIndex
+from .providers import (
+    get_chat_provider,
+    get_embedding_provider,
+    BaseChatProvider,
+    BaseEmbeddingProvider,
+)
+
+if TYPE_CHECKING:
+    from openai import OpenAI
 
 # Template for system context (use get_memory_system_context() to get with current time)
 _MEMORY_SYSTEM_CONTEXT_TEMPLATE = """Current date and time: {datetime}
@@ -203,11 +218,20 @@ class SmartCache:
 class SemanticMemory:
     def __init__(
         self,
+        # Legacy param (still works for backward compat)
         api_key: Optional[str] = None,
+        # Provider selection (defaults from config/env)
+        chat_provider: Optional[str] = None,
+        embedding_provider: Optional[str] = None,
+        chat_api_key: Optional[str] = None,
+        embedding_api_key: Optional[str] = None,
+        # Provider-specific settings
+        provider_kwargs: Optional[Dict] = None,
+        # Core params
         storage_dir: str = "./local_memory",
         cache_size: int = 20,
-        embedding_model: str = "text-embedding-3-small",
-        embedding_dim: int = 1536,
+        embedding_model: Optional[str] = None,
+        embedding_dim: Optional[int] = None,
         chat_model: str = "gpt-5.1",
         reasoning_effort: str = "low",
         auto_memory: bool = True,
@@ -216,11 +240,67 @@ class SemanticMemory:
         include_file_access: bool = False,
         web_search: bool = False,
     ):
-        self.client = OpenAI(api_key=api_key)
+        """
+        Initialize SemanticMemory with provider abstraction.
+
+        Args:
+            api_key: Legacy OpenAI API key (for backward compat). Use chat_api_key/embedding_api_key instead.
+            chat_provider: Chat provider name ("openai", "azure", "anthropic", etc.). Default from env.
+            embedding_provider: Embedding provider name ("openai", "azure", "google", "ollama"). Default from env.
+            chat_api_key: API key for chat provider. Falls back to api_key or env var.
+            embedding_api_key: API key for embedding provider. Falls back to api_key or env var.
+            provider_kwargs: Provider-specific settings (azure_endpoint, ollama_base_url, etc.).
+            storage_dir: Directory for HNSW index and instructions.
+            cache_size: L1 SmartCache capacity.
+            embedding_model: Model for embeddings. Default from provider.
+            embedding_dim: Embedding dimension. Auto-detected from provider if not specified.
+            chat_model: Default chat model.
+            reasoning_effort: For reasoning models: "low", "medium", "high".
+            auto_memory: Enable auto-memory salience detection.
+            auto_memory_threshold: Salience threshold for auto-save (0-1).
+            include_memory_context: Include memory system context in instructions.
+            include_file_access: Include file access context.
+            web_search: Enable web search tool.
+        """
+        # Resolve provider names from env if not specified
+        chat_provider = chat_provider or os.getenv("SEMMEM_CHAT_PROVIDER", DEFAULT_CHAT_PROVIDER)
+        embedding_provider = embedding_provider or os.getenv("SEMMEM_EMBEDDING_PROVIDER", DEFAULT_EMBEDDING_PROVIDER)
+
+        # Resolve API keys
+        resolved_chat_key = chat_api_key or api_key or get_api_key(provider=chat_provider)
+        resolved_embedding_key = embedding_api_key or api_key or get_api_key(provider=embedding_provider)
+
+        # Merge provider kwargs from env
+        all_provider_kwargs = get_provider_kwargs()
+        if provider_kwargs:
+            all_provider_kwargs.update(provider_kwargs)
+
+        # Initialize providers
+        self._chat_provider: BaseChatProvider = get_chat_provider(
+            chat_provider,
+            api_key=resolved_chat_key,
+            **all_provider_kwargs,
+        )
+        self._embedding_provider: BaseEmbeddingProvider = get_embedding_provider(
+            embedding_provider,
+            api_key=resolved_embedding_key,
+            **all_provider_kwargs,
+        )
+
+        # Store provider names for metadata
+        self._chat_provider_name = chat_provider
+        self._embedding_provider_name = embedding_provider
+
+        # Get embedding model and dimension from provider (single source of truth)
+        self.embedding_model = embedding_model or self._embedding_provider.default_model
+        if embedding_dim is not None:
+            self.embedding_dim = embedding_dim
+        else:
+            self.embedding_dim = self._embedding_provider.model_dimension(self.embedding_model)
+
+        # Store other settings
         self.storage_dir = storage_dir
         self.instructions_file = os.path.join(storage_dir, "instructions.txt")
-        self.embedding_model = embedding_model
-        self.embedding_dim = embedding_dim
         self.chat_model = chat_model
         self.reasoning_effort = reasoning_effort
         self.auto_memory_enabled = auto_memory
@@ -232,10 +312,12 @@ class SemanticMemory:
         # Segmented LRU cache for hot items (L1)
         self.local_cache = SmartCache(capacity=cache_size)
 
-        # HNSW index for L2 storage
+        # HNSW index for L2 storage (with provider metadata)
         self.vector_index = HNSWIndex(
             storage_dir=storage_dir,
-            embedding_dim=embedding_dim,
+            embedding_dim=self.embedding_dim,
+            embedding_provider=embedding_provider,
+            embedding_model=self.embedding_model,
         )
 
         # Auto-memory evaluator (lazy init to avoid import if disabled)
@@ -245,19 +327,35 @@ class SemanticMemory:
             os.makedirs(storage_dir)
 
     @property
+    def client(self) -> "OpenAI":
+        """
+        Legacy access to OpenAI client.
+
+        For backward compatibility with code that accesses memory.client directly.
+        Only available when using OpenAI provider.
+        """
+        if hasattr(self._chat_provider, 'client'):
+            return self._chat_provider.client
+        raise AttributeError(
+            f"Provider '{self._chat_provider_name}' does not expose a client attribute. "
+            f"Use the provider abstraction methods instead."
+        )
+
+    @property
     def auto_memory(self):
         """Lazy-initialize auto-memory evaluator."""
         if self._auto_memory is None and self.auto_memory_enabled:
             from .auto_memory import AutoMemory
             self._auto_memory = AutoMemory(
-                client=self.client,
+                chat_provider=self._chat_provider,
                 salience_threshold=self.auto_memory_threshold,
             )
         return self._auto_memory
 
-    def _is_reasoning_model(self) -> bool:
-        """Check if current model is a reasoning model."""
-        return self.chat_model in ("gpt-5.1", "o1", "o3")
+    def _is_reasoning_model(self, model: Optional[str] = None) -> bool:
+        """Check if model is a reasoning model."""
+        model = model or self.chat_model
+        return self._chat_provider.is_reasoning_model(model)
 
     def _expand_query(self, query: str) -> List[str]:
         """
@@ -267,26 +365,21 @@ class SemanticMemory:
         Returns list of queries including the original.
         """
         try:
-            response = self.client.chat.completions.create(
+            response = self._chat_provider.chat(
+                messages=[{"role": "user", "content": query}],
                 model=QUERY_EXPANSION_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Generate 2-3 alternative phrasings of the user's question "
-                            "that would match stored facts. Focus on:\n"
-                            "- Converting questions to statements (e.g., 'Where do I live?' -> 'I live in')\n"
-                            "- Extracting key entities and topics\n"
-                            "- Using synonyms\n\n"
-                            "Return ONLY the alternative queries, one per line. No numbering or explanations."
-                        )
-                    },
-                    {"role": "user", "content": query}
-                ],
+                instructions=(
+                    "Generate 2-3 alternative phrasings of the user's question "
+                    "that would match stored facts. Focus on:\n"
+                    "- Converting questions to statements (e.g., 'Where do I live?' -> 'I live in')\n"
+                    "- Extracting key entities and topics\n"
+                    "- Using synonyms\n\n"
+                    "Return ONLY the alternative queries, one per line. No numbering or explanations."
+                ),
                 temperature=0.3,
                 max_tokens=100,
             )
-            content = response.choices[0].message.content or ""
+            content = response.text or ""
             alternatives = content.strip().split("\n")
             # Clean and filter empty lines
             alternatives = [q.strip() for q in alternatives if q.strip()]
@@ -338,8 +431,8 @@ class SemanticMemory:
         self.save_instructions(new_text)
 
     def _get_embedding(self, text: str) -> np.ndarray:
-        resp = self.client.embeddings.create(input=text, model=self.embedding_model)
-        return np.array(resp.data[0].embedding)
+        """Generate embedding using the configured embedding provider."""
+        return self._embedding_provider.embed_single(text, self.embedding_model)
 
     def remember(self, text: str, metadata: Dict = None):
         """
@@ -620,12 +713,17 @@ class SemanticMemory:
         web_search: Optional[bool] = None,
     ):
         """
-        Agentic Wrapper using Responses API.
+        Chat with memory context using the configured provider.
+
+        Uses the provider's chat() method, which handles:
+        - OpenAI Responses API when previous_response_id is provided
+        - OpenAI Chat Completions otherwise
+        - Other providers use their native APIs
 
         Args:
             user_query: The user's question
-            previous_response_id: For conversation continuity
-            model: Override the default chat model (gpt-5.1, gpt-4.1)
+            previous_response_id: For conversation continuity (OpenAI only)
+            model: Override the default chat model
             reasoning_effort: For reasoning models: "low", "medium", "high"
             auto_remember: Override auto-memory setting for this call
             web_search: Override web search setting for this call
@@ -655,32 +753,37 @@ class SemanticMemory:
         use_reasoning = reasoning_effort or self.reasoning_effort
         use_web_search = web_search if web_search is not None else self.web_search_enabled
 
-        # Build base parameters
-        create_params: Dict = {
-            "model": use_model,
-            "instructions": instructions,
-            "input": input_text,
-        }
+        # Build provider-specific kwargs
+        kwargs: Dict = {}
 
-        if previous_response_id:
-            create_params["previous_response_id"] = previous_response_id
-
-        # Add web search tool if enabled
+        # Add web search tool if enabled (OpenAI-specific)
         if use_web_search:
-            create_params["tools"] = [{"type": "web_search_preview"}]
+            kwargs["tools"] = [{"type": "web_search_preview"}]
             logs.append("🌐 Web search enabled")
 
-        # Reasoning models (gpt-5.1, o1, o3) require special handling
-        if use_model in ("gpt-5.1", "o1", "o3"):
-            # Reasoning models don't support temperature
-            # Use reasoning parameter for effort level
-            create_params["reasoning"] = {"effort": use_reasoning}
+        # Reasoning models require special handling
+        if self._is_reasoning_model(use_model):
+            kwargs["reasoning_effort"] = use_reasoning
+            # Don't set temperature for reasoning models
         else:
-            # Standard models support temperature
-            create_params["temperature"] = 0.7
+            kwargs["temperature"] = 0.7
 
-        response = self.client.responses.create(**create_params)  # type: ignore
-        response_text = response.output_text
+        # For Responses API, we pass input_text as messages with one user message
+        # The provider will handle Responses API vs Chat Completions based on previous_response_id
+        messages = [{"role": "user", "content": input_text}]
+
+        # Call the provider
+        response = self._chat_provider.chat(
+            messages=messages,
+            model=use_model,
+            instructions=instructions,
+            previous_response_id=previous_response_id,
+            use_responses_api=True,  # Prefer Responses API when available
+            **kwargs,
+        )
+
+        response_text = response.text
+        response_id = response.response_id
 
         # Auto-memory: evaluate and store salient exchanges
         should_auto_remember = auto_remember if auto_remember is not None else self.auto_memory_enabled
@@ -705,4 +808,4 @@ class SemanticMemory:
                 })
                 logs.append(f"💾 Auto-saved ({signal.kind}): {signal.reason} (salience: {signal.salience:.2f})")
 
-        return response_text, response.id, memories, logs
+        return response_text, response_id, memories, logs

@@ -7,9 +7,12 @@ Replaces LSH with hnswlib for better recall and performance at scale.
 import os
 import json
 import threading
+import warnings
 import numpy as np
 import hnswlib
 from typing import List, Dict, Optional, Tuple
+
+from .exceptions import EmbeddingMismatchError
 
 
 class HNSWIndex:
@@ -27,6 +30,8 @@ class HNSWIndex:
         max_elements: int = 100000,
         ef_construction: int = 200,
         M: int = 16,
+        embedding_provider: Optional[str] = None,
+        embedding_model: Optional[str] = None,
     ):
         """
         Initialize HNSW index.
@@ -37,12 +42,19 @@ class HNSWIndex:
             max_elements: Maximum capacity (can be resized)
             ef_construction: Controls index quality (higher = better but slower build)
             M: Number of connections per layer (higher = better recall, more memory)
+            embedding_provider: Provider name for embeddings (stored in metadata)
+            embedding_model: Model name for embeddings (stored in metadata)
+
+        Raises:
+            EmbeddingMismatchError: If existing index was created with different provider/model
         """
         self.storage_dir = storage_dir
         self.embedding_dim = embedding_dim
         self.max_elements = max_elements
         self.ef_construction = ef_construction
         self.M = M
+        self.embedding_provider = embedding_provider
+        self.embedding_model = embedding_model
 
         self.index_path = os.path.join(storage_dir, "hnsw_index.bin")
         self.metadata_path = os.path.join(storage_dir, "hnsw_metadata.json")
@@ -87,6 +99,33 @@ class HNSWIndex:
             with open(self.metadata_path, 'r') as f:
                 metadata = json.load(f)
 
+            # Validate embedding provider/model compatibility
+            stored_provider = metadata.get('embedding_provider')
+            stored_model = metadata.get('embedding_model')
+
+            # Only validate if both the stored and current values are specified
+            if stored_provider and self.embedding_provider:
+                if stored_provider != self.embedding_provider or stored_model != self.embedding_model:
+                    raise EmbeddingMismatchError(
+                        stored_provider=stored_provider,
+                        stored_model=stored_model,
+                        current_provider=self.embedding_provider,
+                        current_model=self.embedding_model,
+                        storage_dir=self.storage_dir,
+                    )
+            elif stored_provider and not self.embedding_provider:
+                # Use stored values if current not specified (migration path)
+                self.embedding_provider = stored_provider
+                self.embedding_model = stored_model
+            elif self.embedding_provider and not stored_provider:
+                # Old index without provider info - warn but continue
+                warnings.warn(
+                    f"Existing index has no provider metadata. "
+                    f"Assuming it was created with {self.embedding_provider}/{self.embedding_model}. "
+                    f"Delete the index if this is incorrect.",
+                    UserWarning,
+                )
+
             self._id_to_entry = {int(k): v for k, v in metadata['entries'].items()}
             self._text_to_id = metadata['text_to_id']
             self._next_id = metadata['next_id']
@@ -102,11 +141,15 @@ class HNSWIndex:
             if not os.path.exists(self.storage_dir):
                 os.makedirs(self.storage_dir)
 
-            # Save metadata
+            # Save metadata with embedding provider info
             metadata = {
                 'entries': self._id_to_entry,
                 'text_to_id': self._text_to_id,
                 'next_id': self._next_id,
+                # Embedding provider info for validation on reload
+                'embedding_provider': self.embedding_provider,
+                'embedding_model': self.embedding_model,
+                'embedding_dim': self.embedding_dim,
             }
             with open(self.metadata_path, 'w') as f:
                 json.dump(metadata, f)

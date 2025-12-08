@@ -14,10 +14,13 @@ import re
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, List, Tuple, Any
-from openai import OpenAI, AsyncOpenAI
+from typing import Optional, List, Tuple, Any, TYPE_CHECKING
 
 from .config import QUERY_EXPANSION_MODEL
+
+if TYPE_CHECKING:
+    from openai import OpenAI, AsyncOpenAI
+    from .providers import BaseChatProvider
 
 
 # Model for salience evaluation (same cheap model as query expansion)
@@ -300,7 +303,8 @@ class AutoMemory:
 
     def __init__(
         self,
-        client: OpenAI,
+        chat_provider: Optional["BaseChatProvider"] = None,
+        client: Optional["OpenAI"] = None,
         salience_threshold: float = 0.5,
         use_llm_judge: bool = True,
         model: str = AUTO_MEMORY_MODEL,
@@ -309,15 +313,26 @@ class AutoMemory:
         Initialize AutoMemory.
 
         Args:
-            client: OpenAI client for LLM evaluation
+            chat_provider: Chat provider for LLM evaluation (preferred)
+            client: Legacy OpenAI client (for backward compat)
             salience_threshold: Minimum salience to remember (default 0.5)
             use_llm_judge: If True, use LLM for ambiguous cases
             model: Model to use for salience evaluation
         """
-        self.client = client
+        self._chat_provider = chat_provider
+        self._legacy_client = client
         self.salience_threshold = salience_threshold
         self.use_llm_judge = use_llm_judge
         self.model = model
+
+    @property
+    def client(self) -> "OpenAI":
+        """Legacy client access for backward compatibility."""
+        if self._legacy_client is not None:
+            return self._legacy_client
+        if self._chat_provider is not None and hasattr(self._chat_provider, 'client'):
+            return self._chat_provider.client
+        raise AttributeError("No client available. Provide chat_provider or client.")
 
     def evaluate(self, user_msg: str, assistant_msg: str) -> MemorySignal:
         """
@@ -376,18 +391,31 @@ class AutoMemory:
         try:
             exchange = f"USER: {user_msg}\n\nASSISTANT: {assistant_msg}"
 
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": SALIENCE_EVAL_PROMPT},
-                    {"role": "user", "content": exchange}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.1,
-                max_tokens=200,
-            )
+            # Use provider if available, otherwise fall back to legacy client
+            if self._chat_provider is not None:
+                response = self._chat_provider.chat(
+                    messages=[{"role": "user", "content": exchange}],
+                    model=self.model,
+                    instructions=SALIENCE_EVAL_PROMPT,
+                    temperature=0.1,
+                    max_tokens=200,
+                    response_format={"type": "json_object"},
+                )
+                content = response.text or "{}"
+            else:
+                # Legacy path using OpenAI client directly
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": SALIENCE_EVAL_PROMPT},
+                        {"role": "user", "content": exchange}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.1,
+                    max_tokens=200,
+                )
+                content = response.choices[0].message.content or "{}"
 
-            content = response.choices[0].message.content or "{}"
             result = json.loads(content)
 
             return MemorySignal(
@@ -413,7 +441,7 @@ class AsyncAutoMemory:
 
     def __init__(
         self,
-        client: AsyncOpenAI,
+        client: "AsyncOpenAI",
         salience_threshold: float = 0.5,
         use_llm_judge: bool = True,
         model: str = AUTO_MEMORY_MODEL,
