@@ -11,7 +11,8 @@ Usage:
 import streamlit as st
 import httpx
 import os
-from datetime import datetime
+import copy
+from datetime import datetime, timezone
 
 from sem_mem.config import (
     AUTO_THREAD_RENAME_ENABLED,
@@ -103,10 +104,50 @@ def _create_empty_thread() -> dict:
     }
 
 
+# --- Thread Persistence ---
+def _load_persisted_threads() -> dict:
+    """Load threads from API server."""
+    try:
+        result = api_request("GET", "/threads", timeout=5.0)
+        if result and result.get("threads"):
+            return result["threads"]
+    except Exception:
+        pass  # Fallback to empty
+    return {}
+
+
+def _persist_threads_if_changed():
+    """Save threads to API server if they changed (debounced)."""
+    if "threads" not in st.session_state:
+        return
+
+    current = st.session_state.threads
+    last = st.session_state.get("_last_saved_threads", {})
+
+    if current != last:
+        try:
+            api_request("POST", "/threads", json={"threads": current}, timeout=10.0)
+            st.session_state._last_saved_threads = copy.deepcopy(current)
+        except Exception:
+            pass  # Don't break UI on save failures
+
+
+# Load threads on startup (from API or default)
 if "threads" not in st.session_state:
-    st.session_state.threads = {"Thread 1": _create_empty_thread()}
+    persisted = _load_persisted_threads()
+    if persisted:
+        st.session_state.threads = persisted
+        st.session_state._last_saved_threads = copy.deepcopy(persisted)
+    else:
+        st.session_state.threads = {"Thread 1": _create_empty_thread()}
+        st.session_state._last_saved_threads = {}
+
 if "current_thread" not in st.session_state:
-    st.session_state.current_thread = "Thread 1"
+    # Pick first available thread or default
+    if st.session_state.threads:
+        st.session_state.current_thread = list(st.session_state.threads.keys())[0]
+    else:
+        st.session_state.current_thread = "Thread 1"
 
 
 def _should_auto_rename(thread: dict) -> bool:
@@ -208,7 +249,7 @@ Write a concise summary.""",
                             "type": "farewell_summary",
                             "thread_name": thread_name,
                             "thread_title": thread_data.get("title", thread_name),
-                            "timestamp": datetime.utcnow().isoformat(),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
                         }
                     }
                 )
@@ -223,6 +264,9 @@ Write a concise summary.""",
     else:
         st.session_state.threads["Thread 1"] = _create_empty_thread()
         st.session_state.current_thread = "Thread 1"
+
+    # Persist the change
+    _persist_threads_if_changed()
 
     return True
 
@@ -276,6 +320,7 @@ with st.sidebar:
             if new_title and new_title != current_title:
                 current_thread_data["title"] = new_title.strip()
                 current_thread_data["title_user_overridden"] = True
+                _persist_threads_if_changed()
                 st.success("Title saved!")
                 st.rerun()
 
@@ -317,6 +362,7 @@ with st.sidebar:
             new_name = f"Thread {new_id}"
             st.session_state.threads[new_name] = _create_empty_thread()
             st.session_state.current_thread = new_name
+            _persist_threads_if_changed()
             st.rerun()
     with col2:
         current_messages = st.session_state.threads[st.session_state.current_thread]["messages"]
@@ -455,6 +501,104 @@ with st.sidebar:
 
     st.divider()
 
+    # Backup/Restore
+    st.header("💾 Backup & Restore")
+
+    with st.expander("Create Backup", expanded=False):
+        backup_name = st.text_input(
+            "Backup name (optional)",
+            placeholder="my-backup (uses timestamp if empty)",
+            key="backup_name_input"
+        )
+        if st.button("Create Backup", key="create_backup_btn"):
+            with st.spinner("Creating backup..."):
+                params = {}
+                if backup_name.strip():
+                    params["backup_name"] = backup_name.strip()
+                result = api_request("POST", "/backup/create", params=params)
+            if result:
+                st.success(f"Backup created: {result.get('path', '')}")
+                st.caption(f"Memories: {result.get('stats', {}).get('memory_count', 0)}, Threads: {result.get('stats', {}).get('thread_count', 0)}")
+
+    with st.expander("Restore from Backup", expanded=False):
+        # Fetch available backups
+        backups = api_request("GET", "/backup/list")
+        if backups:
+            backup_options = [b["name"] for b in backups]
+            selected_backup = st.selectbox(
+                "Select backup",
+                options=backup_options,
+                key="restore_backup_select"
+            )
+
+            # Show backup details
+            if selected_backup:
+                backup_info = next((b for b in backups if b["name"] == selected_backup), None)
+                if backup_info:
+                    st.caption(f"Created: {backup_info.get('created_at', 'unknown')}")
+                    st.caption(f"Memories: {backup_info.get('memory_count', 0)}, Threads: {backup_info.get('thread_count', 0)}")
+
+            merge_mode = st.checkbox("Merge with existing data", value=False, key="restore_merge")
+            re_embed = st.checkbox("Re-embed vectors (if model changed)", value=False, key="restore_reembed")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Restore", type="primary", key="restore_btn"):
+                    with st.spinner("Restoring..."):
+                        result = api_request(
+                            "POST",
+                            "/backup/restore",
+                            json={
+                                "backup_name": selected_backup,
+                                "merge": merge_mode,
+                                "re_embed": re_embed
+                            }
+                        )
+                    if result:
+                        st.success("Restore complete!")
+                        st.caption(f"Added: {result.get('memories_added', 0)}, Skipped: {result.get('memories_skipped', 0)}")
+                        st.caption(f"Threads: {result.get('threads_restored', 0)}, Instructions: {result.get('instructions_action', '')}")
+                        # Reload threads from server
+                        st.session_state.pop("threads", None)
+                        st.session_state.pop("_last_saved_threads", None)
+                        st.cache_data.clear()
+                        st.rerun()
+            with col2:
+                if st.button("Delete Backup", type="secondary", key="delete_backup_btn"):
+                    result = api_request("DELETE", f"/backup/{selected_backup}")
+                    if result and result.get("deleted"):
+                        st.success("Backup deleted!")
+                        st.rerun()
+        else:
+            st.info("No backups available")
+
+    with st.expander("Export Data", expanded=False):
+        st.caption("Download all memory data as JSON")
+        include_vectors = st.checkbox("Include vectors", value=True, key="export_vectors")
+        include_threads = st.checkbox("Include threads", value=True, key="export_threads")
+
+        if st.button("Export", key="export_btn"):
+            with st.spinner("Exporting..."):
+                result = api_request(
+                    "GET",
+                    "/backup/export",
+                    params={
+                        "include_vectors": include_vectors,
+                        "include_threads": include_threads
+                    }
+                )
+            if result:
+                import json
+                export_json = json.dumps(result, indent=2)
+                st.download_button(
+                    label="Download JSON",
+                    data=export_json,
+                    file_name=f"sem-mem-export-{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json"
+                )
+
+    st.divider()
+
     # Sema File Access Management
     st.header("📂 Sema File Access")
     st.caption("Manage which files Sema (Semantic Memory Agent) can see")
@@ -528,14 +672,21 @@ with tab1:
     thread_data = st.session_state.threads[st.session_state.current_thread]
     messages = thread_data["messages"]
 
-    for msg in messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    # Chat container for message history (fixed height for stable layout)
+    chat_container = st.container(height=500)
 
+    with chat_container:
+        for msg in messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+    # Chat input at fixed position below container
     if prompt := st.chat_input("Ask a question, 'remember: ...', or 'instruct: ...'"):
         messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+
+        with chat_container:
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
         # 1. Instruct Command
         if prompt.lower().startswith("instruct:"):
@@ -543,9 +694,11 @@ with tab1:
             api_request("POST", "/instructions", json={"instruction": instruction})
             response = f"✅ **Instruction added.**\n*\"{instruction}\"*"
             messages.append({"role": "assistant", "content": response})
-            with st.chat_message("assistant"):
-                st.markdown(response)
+            with chat_container:
+                with st.chat_message("assistant"):
+                    st.markdown(response)
             st.cache_data.clear()
+            _persist_threads_if_changed()
 
         # 2. Remember Command
         elif prompt.lower().startswith("remember:"):
@@ -553,9 +706,11 @@ with tab1:
             result = api_request("POST", "/remember", json={"text": fact})
             response = f"✅ **Stored.** \n*({result.get('message', '')})*"
             messages.append({"role": "assistant", "content": response})
-            with st.chat_message("assistant"):
-                st.markdown(response)
+            with chat_container:
+                with st.chat_message("assistant"):
+                    st.markdown(response)
             st.cache_data.clear()
+            _persist_threads_if_changed()
 
         # 3. Chat with RAG
         else:
@@ -589,8 +744,12 @@ with tab1:
                     full_response += sources
 
                 messages.append({"role": "assistant", "content": full_response})
-                with st.chat_message("assistant"):
-                    st.markdown(full_response)
+                with chat_container:
+                    with st.chat_message("assistant"):
+                        st.markdown(full_response)
+
+                # Persist thread after assistant response
+                _persist_threads_if_changed()
 
         # Auto-rename thread if eligible
         if _should_auto_rename(thread_data):
@@ -598,6 +757,7 @@ with tab1:
                 new_title = _generate_thread_title_via_api(messages)
             if new_title:
                 thread_data["title"] = new_title.strip()
+                _persist_threads_if_changed()
                 st.rerun()
 
 # TAB 2: Files (Sema's view)
@@ -707,6 +867,10 @@ with tab3:
             "GET /files",
             "GET /files/content",
             "GET /files/search",
+            "GET /backup/list",
+            "GET /backup/export",
+            "POST /backup/create",
+            "GET /threads",
             "POST /recall",
             "POST /remember",
             "POST /chat",
@@ -762,6 +926,35 @@ with tab3:
         max_results = st.slider("Max results", 1, 50, 20)
         if st.button("Execute") and query:
             result = api_request("GET", "/files/search", params={"query": query, "max_results": max_results})
+            st.json(result)
+
+    elif endpoint == "GET /backup/list":
+        if st.button("Execute"):
+            result = api_request("GET", "/backup/list")
+            st.json(result)
+
+    elif endpoint == "GET /backup/export":
+        include_vectors = st.checkbox("Include vectors", value=True, key="api_export_vectors")
+        include_threads = st.checkbox("Include threads", value=True, key="api_export_threads")
+        if st.button("Execute"):
+            result = api_request("GET", "/backup/export", params={
+                "include_vectors": include_vectors,
+                "include_threads": include_threads
+            })
+            st.json(result)
+
+    elif endpoint == "POST /backup/create":
+        backup_name = st.text_input("Backup name (optional):", key="api_backup_name")
+        if st.button("Execute"):
+            params = {}
+            if backup_name.strip():
+                params["backup_name"] = backup_name.strip()
+            result = api_request("POST", "/backup/create", params=params)
+            st.json(result)
+
+    elif endpoint == "GET /threads":
+        if st.button("Execute"):
+            result = api_request("GET", "/threads")
             st.json(result)
 
     elif endpoint == "POST /recall":

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from sem_mem.async_core import AsyncSemanticMemory
 from sem_mem.config import get_api_key, get_config, CHAT_MODELS, REASONING_EFFORTS, DEFAULT_CHAT_MODEL
 from sem_mem.api.files import router as files_router
+from sem_mem.api.backup import backup_router, threads_router, get_memory as backup_get_memory
 
 
 # --- Pydantic Models ---
@@ -134,6 +135,8 @@ app.add_middleware(
 
 # Include routers
 app.include_router(files_router)
+app.include_router(backup_router)
+app.include_router(threads_router)
 
 
 def get_memory() -> AsyncSemanticMemory:
@@ -141,6 +144,10 @@ def get_memory() -> AsyncSemanticMemory:
     if memory is None:
         raise HTTPException(status_code=503, detail="Memory not initialized")
     return memory
+
+
+# Override backup router's get_memory dependency
+app.dependency_overrides[backup_get_memory] = get_memory
 
 
 # --- Endpoints ---

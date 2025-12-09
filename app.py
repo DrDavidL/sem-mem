@@ -101,10 +101,40 @@ def _create_empty_thread() -> dict:
     }
 
 
+# Load persisted threads from disk, or initialize with default
 if "threads" not in st.session_state:
-    st.session_state.threads = {"Thread 1": _create_empty_thread()}
+    try:
+        persisted = agent.load_threads()
+        if persisted:
+            st.session_state.threads = persisted
+        else:
+            st.session_state.threads = {"Thread 1": _create_empty_thread()}
+    except Exception:
+        st.session_state.threads = {"Thread 1": _create_empty_thread()}
+
 if "current_thread" not in st.session_state:
-    st.session_state.current_thread = "Thread 1"
+    # Use first available thread
+    st.session_state.current_thread = next(iter(st.session_state.threads.keys()), "Thread 1")
+
+# Track last saved state for debouncing
+if "_last_saved_threads" not in st.session_state:
+    st.session_state._last_saved_threads = None
+
+
+def _persist_threads_if_changed():
+    """Save threads to disk if they have changed since last save."""
+    import copy
+    current = st.session_state.threads
+    last = st.session_state._last_saved_threads
+
+    # Simple change detection
+    if current != last:
+        try:
+            agent.save_threads(current)
+            st.session_state._last_saved_threads = copy.deepcopy(current)
+        except Exception as e:
+            # Don't break the UI on save failures
+            pass
 
 
 def _should_auto_rename(thread: dict) -> bool:
@@ -317,6 +347,9 @@ def _handle_delete_thread(thread_name: str, save_summary: bool) -> bool:
         st.session_state.threads["Thread 1"] = _create_empty_thread()
         st.session_state.current_thread = "Thread 1"
 
+    # Persist change to disk
+    _persist_threads_if_changed()
+
     return True
 
 
@@ -409,6 +442,7 @@ with st.sidebar:
             new_name = f"Thread {new_id}"
             st.session_state.threads[new_name] = _create_empty_thread()
             st.session_state.current_thread = new_name
+            _persist_threads_if_changed()
             st.rerun()
     with col2:
         current_messages = st.session_state.threads[st.session_state.current_thread]["messages"]
@@ -672,6 +706,9 @@ with tab1:
         # This creates "chapter" summaries stored in L2 for durable semantic history
         if _maybe_summarize_thread(thread_data, st.session_state.current_thread):
             st.toast("Created summary of earlier conversation", icon="📝")
+
+        # Persist threads to disk after each assistant response
+        _persist_threads_if_changed()
 
 # TAB 2: Atlas
 with tab2:

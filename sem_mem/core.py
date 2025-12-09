@@ -14,6 +14,8 @@ from .config import (
     get_provider_kwargs,
 )
 from .vector_index import HNSWIndex
+from .thread_storage import ThreadStorage
+from .backup import MemoryBackup
 from .providers import (
     get_chat_provider,
     get_embedding_provider,
@@ -322,6 +324,17 @@ class SemanticMemory:
 
         # Auto-memory evaluator (lazy init to avoid import if disabled)
         self._auto_memory = None
+
+        # Thread storage and backup manager
+        self._thread_storage = ThreadStorage(storage_dir=storage_dir)
+        self._backup = MemoryBackup(
+            storage_dir=storage_dir,
+            vector_index=self.vector_index,
+            thread_storage=self._thread_storage,
+            embedding_provider=self._embedding_provider,
+            embedding_model=self.embedding_model,
+            embedding_dim=self.embedding_dim,
+        )
 
         if not os.path.exists(storage_dir):
             os.makedirs(storage_dir)
@@ -809,3 +822,160 @@ class SemanticMemory:
                 logs.append(f"💾 Auto-saved ({signal.kind}): {signal.reason} (salience: {signal.salience:.2f})")
 
         return response_text, response_id, memories, logs
+
+    # ==========================================================================
+    # Thread Persistence Methods
+    # ==========================================================================
+
+    def save_threads(self, threads: Dict[str, Dict]) -> None:
+        """
+        Save all conversation threads to disk.
+
+        Args:
+            threads: Dict mapping thread names to thread data
+        """
+        self._thread_storage.save_threads(threads)
+
+    def load_threads(self) -> Dict[str, Dict]:
+        """
+        Load conversation threads from disk.
+
+        Returns:
+            Dict mapping thread names to thread data.
+            Returns empty dict if no threads file exists.
+        """
+        return self._thread_storage.load_threads()
+
+    def save_thread(self, name: str, thread: Dict) -> None:
+        """
+        Save a single conversation thread.
+
+        Args:
+            name: Thread name/identifier
+            thread: Thread data dict
+        """
+        self._thread_storage.save_thread(name, thread)
+
+    def get_thread(self, name: str) -> Optional[Dict]:
+        """
+        Get a single thread by name.
+
+        Args:
+            name: Thread name/identifier
+
+        Returns:
+            Thread data dict, or None if not found
+        """
+        return self._thread_storage.get_thread(name)
+
+    def delete_thread(self, name: str) -> bool:
+        """
+        Delete a conversation thread from persistent storage.
+
+        Note: This only removes from disk storage, not from any in-memory
+        session state.
+
+        Args:
+            name: Thread name to delete
+
+        Returns:
+            True if deleted, False if thread didn't exist
+        """
+        return self._thread_storage.delete_thread(name)
+
+    # ==========================================================================
+    # Backup and Export Methods
+    # ==========================================================================
+
+    def export_all(
+        self,
+        include_vectors: bool = True,
+        include_threads: bool = True,
+    ) -> Dict:
+        """
+        Export all memory data to a JSON-serializable dict.
+
+        Args:
+            include_vectors: Include embedding vectors (larger but fully portable)
+            include_threads: Include conversation threads
+
+        Returns:
+            Complete backup dict with instructions, memories, threads, and metadata
+        """
+        return self._backup.export_all(
+            include_vectors=include_vectors,
+            include_threads=include_threads,
+        )
+
+    def backup(self, backup_name: Optional[str] = None) -> Dict:
+        """
+        Create a timestamped backup of all memory data.
+
+        Args:
+            backup_name: Optional custom name (without .json).
+                        If None, uses timestamp.
+
+        Returns:
+            {"path": "backups/...", "stats": {"memory_count": N, ...}}
+        """
+        return self._backup.create_backup(backup_name=backup_name)
+
+    def restore(
+        self,
+        backup_name: str,
+        merge: bool = False,
+        re_embed: bool = False,
+    ) -> Dict:
+        """
+        Restore memory from a backup file.
+
+        Args:
+            backup_name: Backup filename (with or without .json)
+            merge: If True, merge with existing data. If False, replace all.
+            re_embed: If True, recompute vectors using current embedding model.
+
+        Returns:
+            {
+                "memories_added": N,
+                "memories_skipped": N,
+                "threads_restored": N,
+                "re_embedded": N,
+                "instructions_action": "replaced" | "kept"
+            }
+
+        Raises:
+            FileNotFoundError: If backup doesn't exist
+            EmbeddingMismatchError: If embedding model mismatch with re_embed=False
+        """
+        # Update backup's reference to vector_index in case it was recreated
+        self._backup.vector_index = self.vector_index
+        result = self._backup.restore_backup(
+            backup_name=backup_name,
+            merge=merge,
+            re_embed=re_embed,
+        )
+        # Update our reference to the potentially new vector_index
+        self.vector_index = self._backup.vector_index
+        return result
+
+    def list_backups(self) -> List[Dict]:
+        """
+        List available backups.
+
+        Returns:
+            List of backup info dicts with name, path, created_at,
+            memory_count, thread_count
+        """
+        return self._backup.list_backups()
+
+    def delete_backup(self, backup_name: str) -> bool:
+        """
+        Delete a backup file.
+
+        Args:
+            backup_name: Backup filename (with or without .json)
+
+        Returns:
+            True if deleted, False if didn't exist
+        """
+        return self._backup.delete_backup(backup_name)

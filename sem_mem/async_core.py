@@ -3,12 +3,15 @@ Async version of SemanticMemory for use with FastAPI and other async frameworks.
 """
 
 import os
+import json
 import asyncio
 import aiofiles
 import numpy as np
 from openai import AsyncOpenAI
 from typing import List, Dict, Optional, Tuple
 from .core import SmartCache, get_memory_system_context
+from .thread_storage import ThreadStorage
+from .backup import MemoryBackup
 from .config import QUERY_EXPANSION_MODEL
 from .vector_index import HNSWIndex
 
@@ -64,6 +67,17 @@ class AsyncSemanticMemory:
 
         # Auto-memory evaluator (lazy init)
         self._auto_memory = None
+
+        # Thread storage and backup manager (sync operations, fast)
+        self._thread_storage = ThreadStorage(storage_dir=storage_dir)
+        self._backup = MemoryBackup(
+            storage_dir=storage_dir,
+            vector_index=self.vector_index,
+            thread_storage=self._thread_storage,
+            embedding_provider=None,  # Async uses its own embedding via _get_embedding
+            embedding_model=embedding_model,
+            embedding_dim=embedding_dim,
+        )
 
         # Ensure storage directory exists (sync is fine for init)
         if not os.path.exists(storage_dir):
@@ -465,3 +479,237 @@ class AsyncSemanticMemory:
             "l2_memories": self.vector_index.get_entry_count(),
             "l1_cache_size": len(list(self.local_cache)),
         }
+
+    # ==========================================================================
+    # Thread Persistence Methods (async file I/O)
+    # ==========================================================================
+
+    async def save_threads(self, threads: Dict[str, Dict]) -> None:
+        """
+        Save all conversation threads to disk.
+
+        Args:
+            threads: Dict mapping thread names to thread data
+        """
+        data = {"version": self._thread_storage.VERSION, "threads": threads}
+        temp_path = self._thread_storage.threads_file + ".tmp"
+        async with aiofiles.open(temp_path, 'w') as f:
+            await f.write(json.dumps(data, indent=2))
+        os.replace(temp_path, self._thread_storage.threads_file)
+
+    async def load_threads(self) -> Dict[str, Dict]:
+        """
+        Load conversation threads from disk.
+
+        Returns:
+            Dict mapping thread names to thread data.
+        """
+        if not os.path.exists(self._thread_storage.threads_file):
+            return {}
+        try:
+            async with aiofiles.open(self._thread_storage.threads_file, 'r') as f:
+                content = await f.read()
+                data = json.loads(content)
+                return data.get("threads", {})
+        except (json.JSONDecodeError, IOError):
+            return {}
+
+    async def save_thread(self, name: str, thread: Dict) -> None:
+        """
+        Save a single conversation thread.
+
+        Args:
+            name: Thread name/identifier
+            thread: Thread data dict
+        """
+        threads = await self.load_threads()
+        threads[name] = thread
+        await self.save_threads(threads)
+
+    async def get_thread(self, name: str) -> Optional[Dict]:
+        """
+        Get a single thread by name.
+
+        Args:
+            name: Thread name/identifier
+
+        Returns:
+            Thread data dict, or None if not found
+        """
+        threads = await self.load_threads()
+        return threads.get(name)
+
+    async def delete_thread(self, name: str) -> bool:
+        """
+        Delete a conversation thread from persistent storage.
+
+        Args:
+            name: Thread name to delete
+
+        Returns:
+            True if deleted, False if thread didn't exist
+        """
+        threads = await self.load_threads()
+        if name in threads:
+            del threads[name]
+            await self.save_threads(threads)
+            return True
+        return False
+
+    # ==========================================================================
+    # Backup and Export Methods
+    # ==========================================================================
+
+    def export_all(
+        self,
+        include_vectors: bool = True,
+        include_threads: bool = True,
+    ) -> Dict:
+        """
+        Export all memory data to a JSON-serializable dict.
+
+        Note: This is sync because the actual work is fast (in-memory).
+
+        Args:
+            include_vectors: Include embedding vectors
+            include_threads: Include conversation threads
+
+        Returns:
+            Complete backup dict
+        """
+        return self._backup.export_all(
+            include_vectors=include_vectors,
+            include_threads=include_threads,
+        )
+
+    async def backup(self, backup_name: Optional[str] = None) -> Dict:
+        """
+        Create a timestamped backup of all memory data.
+
+        Args:
+            backup_name: Optional custom name (without .json)
+
+        Returns:
+            {"path": "backups/...", "stats": {...}}
+        """
+        # Export data (sync, fast)
+        data = self._backup.export_all(include_vectors=True, include_threads=True)
+
+        # Generate filename
+        if backup_name:
+            safe_name = "".join(c for c in backup_name if c.isalnum() or c in "-_")
+            filename = f"{safe_name}.json"
+        else:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"backup_{timestamp}.json"
+
+        backup_path = os.path.join(self._backup.backups_dir, filename)
+        relative_path = os.path.join("backups", filename)
+
+        # Write async
+        async with aiofiles.open(backup_path, 'w') as f:
+            await f.write(json.dumps(data, indent=2))
+
+        return {
+            "path": relative_path,
+            "stats": {
+                "memory_count": data["metadata"]["memory_count"],
+                "thread_count": data["metadata"]["thread_count"],
+                "created_at": data["created_at"],
+            }
+        }
+
+    async def restore(
+        self,
+        backup_name: str,
+        merge: bool = False,
+        re_embed: bool = False,
+    ) -> Dict:
+        """
+        Restore memory from a backup file.
+
+        Args:
+            backup_name: Backup filename (with or without .json)
+            merge: If True, merge with existing data. If False, replace.
+            re_embed: If True, recompute vectors.
+
+        Returns:
+            Restore statistics dict
+
+        Raises:
+            FileNotFoundError: If backup doesn't exist
+        """
+        backup_path = self._backup.get_backup_path(backup_name)
+
+        # Read async
+        async with aiofiles.open(backup_path, 'r') as f:
+            content = await f.read()
+            data = json.loads(content)
+
+        # Most restore logic is sync (fast index operations)
+        # Only re-embedding needs async
+        if re_embed:
+            # Re-embed memories async
+            memories = data.get("memories", [])
+            for memory in memories:
+                vector = await self._get_embedding(memory["text"])
+                memory["vector"] = vector.tolist()
+
+        # Now do sync restore with pre-computed vectors
+        self._backup.vector_index = self.vector_index
+        # Temporarily mark as having vectors
+        if "metadata" in data:
+            data["metadata"]["include_vectors"] = True
+
+        # Write modified data to temp file and restore
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(data, f)
+            temp_path = f.name
+
+        try:
+            # Rename to backup dir temporarily
+            temp_backup_name = f"_temp_restore_{os.getpid()}.json"
+            final_temp_path = os.path.join(self._backup.backups_dir, temp_backup_name)
+            os.rename(temp_path, final_temp_path)
+
+            result = self._backup.restore_backup(
+                backup_name=temp_backup_name,
+                merge=merge,
+                re_embed=False,  # Already re-embedded above
+            )
+
+            # Clean up temp backup
+            os.remove(final_temp_path)
+        except Exception:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+
+        self.vector_index = self._backup.vector_index
+        if re_embed:
+            result["re_embedded"] = len(data.get("memories", []))
+
+        return result
+
+    def list_backups(self) -> List[Dict]:
+        """
+        List available backups.
+
+        Returns:
+            List of backup info dicts
+        """
+        return self._backup.list_backups()
+
+    def delete_backup(self, backup_name: str) -> bool:
+        """
+        Delete a backup file.
+
+        Args:
+            backup_name: Backup filename
+
+        Returns:
+            True if deleted, False if didn't exist
+        """
+        return self._backup.delete_backup(backup_name)

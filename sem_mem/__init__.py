@@ -26,6 +26,8 @@ from .core import SemanticMemory, SmartCache, MEMORY_SYSTEM_CONTEXT, get_memory_
 from .decorators import with_memory, with_instructions, with_rag, MemoryChat
 from .config import get_api_key, get_config, get_provider_api_key, get_provider_kwargs
 from .vector_index import HNSWIndex, migrate_lsh_to_hnsw
+from .thread_storage import ThreadStorage
+from .backup import MemoryBackup
 from .auto_memory import AutoMemory, AsyncAutoMemory, MemorySignal, compute_quick_salience
 from .thread_utils import (
     generate_thread_title,
@@ -84,6 +86,9 @@ __all__ = [
     # Index
     "HNSWIndex",
     "migrate_lsh_to_hnsw",
+    # Backup and Thread Storage
+    "ThreadStorage",
+    "MemoryBackup",
     # Auto-memory
     "AutoMemory",
     "AsyncAutoMemory",

@@ -460,6 +460,111 @@ When running the FastAPI server:
 
 API documentation available at `http://localhost:8000/docs` when server is running.
 
+## Backup & Restore
+
+Sem-Mem provides full backup and restore functionality for all memory data, including HNSW vectors, instructions, and conversation threads.
+
+### Backup Format
+
+Backups are stored as JSON files in `local_memory/backups/`:
+
+```json
+{
+  "format": "sem-mem-backup",
+  "version": "1.0",
+  "created_at": "2025-12-08T10:30:00Z",
+  "instructions": "You are a helpful assistant...",
+  "memories": [
+    {"id": "abc123...", "text": "...", "vector": [...], "metadata": {...}}
+  ],
+  "threads": {
+    "Thread 1": {"messages": [...], "title": "...", ...}
+  },
+  "metadata": {
+    "memory_count": 42,
+    "thread_count": 3,
+    "embedding_model": "text-embedding-3-small"
+  }
+}
+```
+
+### Python API
+
+```python
+from sem_mem import SemanticMemory
+
+memory = SemanticMemory(api_key="sk-...")
+
+# Create a backup
+result = memory.backup()  # Auto-timestamped: backup_20251208_103000.json
+result = memory.backup(backup_name="before-migration")  # Custom name
+
+# List available backups
+backups = memory.list_backups()
+# [{"name": "backup_20251208_103000.json", "memory_count": 42, ...}, ...]
+
+# Restore from backup
+stats = memory.restore("backup_20251208_103000")
+# {"memories_added": 40, "threads_restored": 3, ...}
+
+# Merge mode: add new memories without replacing existing ones
+stats = memory.restore("other_backup", merge=True)
+
+# Re-embed: recompute vectors if embedding model changed
+stats = memory.restore("old_backup", re_embed=True)
+
+# Export without creating a file
+data = memory.export_all(include_vectors=True, include_threads=True)
+```
+
+### REST API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/backup/export` | GET | Export all data as JSON (in-memory, no file) |
+| `/backup/create` | POST | Create timestamped backup file |
+| `/backup/list` | GET | List available backups with metadata |
+| `/backup/restore` | POST | Restore from backup (supports `merge`, `re_embed`) |
+| `/backup/{name}` | DELETE | Delete a backup file |
+
+### Thread Persistence Endpoints
+
+Conversation threads are automatically persisted to `local_memory/threads.json`:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/threads` | GET | Get all persisted threads |
+| `/threads/{name}` | GET | Get a single thread by name |
+| `/threads` | POST | Save all threads |
+| `/threads/{name}` | PUT | Save/update a single thread |
+| `/threads/{name}` | DELETE | Delete a thread |
+
+### Merge vs Replace Semantics
+
+**Replace mode** (`merge=False`, default):
+- Clears existing HNSW index and rebuilds from backup
+- Replaces instructions with backup (unless backup has none)
+- Replaces all threads with backup data
+
+**Merge mode** (`merge=True`):
+- Adds memories not already present (SHA256 deduplication)
+- Merges threads, overwriting on name collision
+- Keeps current instructions (ignores backup instructions)
+
+### Embedding Model Compatibility
+
+Backups store the embedding model used. On restore:
+
+- **Same model**: Vectors are reused directly
+- **Different model + `re_embed=False`**: Raises `EmbeddingMismatchError`
+- **Different model + `re_embed=True`**: Recomputes all vectors from text
+
+```python
+# Migrate to a new embedding model
+stats = memory.restore("old_backup", re_embed=True)
+print(f"Re-embedded {stats['re_embedded']} memories")
+```
+
 ## Project Structure
 
 ```text
@@ -472,9 +577,19 @@ API documentation available at `http://localhost:8000/docs` when server is runni
 │   ├── vector_index.py      # HNSWIndex for L2 storage
 │   ├── decorators.py        # @with_memory, @with_rag, MemoryChat
 │   ├── auto_memory.py       # AutoMemory salience detection
-│   └── thread_utils.py      # Thread utilities (title generation, summarization)
+│   ├── thread_utils.py      # Thread utilities (title generation, summarization)
+│   ├── backup.py            # MemoryBackup class for backup/restore
+│   ├── thread_storage.py    # ThreadStorage for persistent threads
+│   └── api/
+│       ├── backup.py        # FastAPI backup & threads endpoints
+│       └── files.py         # File upload endpoints
 ├── tests/                   # Unit tests
 ├── local_memory/            # HNSW index files + instructions.txt
+│   ├── hnsw_index.bin       # HNSW vector index
+│   ├── hnsw_metadata.json   # Index metadata
+│   ├── instructions.txt     # Persistent instructions
+│   ├── threads.json         # Persisted conversation threads
+│   └── backups/             # Backup files
 ├── app.py                   # Streamlit standalone app
 ├── app_api.py               # Streamlit API client app
 ├── server.py                # FastAPI server
@@ -809,10 +924,12 @@ Sem-Mem can be used in small production setups, but keep these in mind:
     - One shared disk index mounted read/write
     - Or per-worker copies with a periodic sync strategy
 
-- **Backups and durability.**  
+- **Backups and durability.**
   The HNSW index and instructions are just files:
-  - Use regular filesystem backups / snapshots if memories are important.
-  - Consider versioning the memory directory for “time travel” or rollback.
+  - Use `memory.backup()` to create timestamped backups to `local_memory/backups/`
+  - Use `memory.restore("backup_name")` to restore from backup
+  - Consider regular filesystem backups / snapshots as well
+  - Use merge mode (`merge=True`) to add new memories without losing existing ones
 
 - **Latency vs. index size.**  
   As L2 grows, you may want to:
