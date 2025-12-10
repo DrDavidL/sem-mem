@@ -951,7 +951,71 @@ Sem-Mem can be used in small production setups, but keep these in mind:
     - HNSW query times
     - End-to-end request latency
 
-In short: Sem-Mem is great for **local-first assistants, internal tools, and research agents**. If you’re building a large, multi-tenant SaaS with strict SLOs, you’ll likely pair Sem-Mem with more traditional infrastructure (or use a hosted vector DB directly).
+In short: Sem-Mem is great for **local-first assistants, internal tools, and research agents**. If you're building a large, multi-tenant SaaS with strict SLOs, you'll likely pair Sem-Mem with more traditional infrastructure (or use a hosted vector DB directly).
+
+## Future Directions
+
+Sem-Mem's current approach is **similarity-based retrieval**: find memories semantically close to the query. This works well for many use cases, but there are compelling ideas from related projects worth exploring.
+
+### Outcome-Based Learning
+
+[Roampal](https://github.com/roampal-ai/roampal) introduces **outcome-tracked memory**—rather than just matching by similarity, the system learns which memories actually helped the user:
+
+- **Outcome scoring**: Memories get boosted (+0.2) when advice works, penalized (-0.3) when it fails
+- **Personalized relevance**: Over time, retrieval favors what's proven effective for *this specific user*
+- **Pattern promotion**: Memories that succeed repeatedly get promoted to permanent "pattern" storage
+
+This addresses a key limitation of pure semantic search: a memory can be *similar* to a query but not *useful* for it. Outcome learning bridges this gap.
+
+**Potential Sem-Mem integration:**
+```python
+# Future API concept (not yet implemented)
+memory.record_outcome(memory_id, "success")  # Boost this memory's retrieval score
+memory.record_outcome(memory_id, "failure")  # Penalize this memory
+
+# Retrieval would then factor in outcome history
+memories = memory.recall(query, use_outcomes=True)
+```
+
+### Hybrid Search
+
+Roampal and similar systems combine multiple retrieval strategies:
+
+| Strategy | Strength | Weakness |
+|----------|----------|----------|
+| **Vector/semantic** | Finds conceptually related content | Misses exact matches, keyword-heavy queries |
+| **BM25/lexical** | Exact keyword matching | No semantic understanding |
+| **Cross-encoder reranking** | High precision | Slower, requires candidate set |
+
+Sem-Mem currently uses pure vector search. Adding BM25 as a fallback or hybrid scorer could improve retrieval for keyword-heavy queries.
+
+### Tiered Memory Retention
+
+Roampal's 5-tier model with automatic retention policies is interesting:
+
+| Tier | Retention | Promotion Criteria |
+|------|-----------|-------------------|
+| Working | 24 hours | Current context |
+| History | 30 days | Recent interactions |
+| Patterns | Permanent | Score ≥0.9, 3+ successful uses |
+| Memory Bank | Permanent | User identity/preferences |
+| Books | Permanent | Reference documents |
+
+Sem-Mem's L1/L2 model is simpler (cache vs. permanent storage), but could benefit from:
+- **Time-based decay** for less-accessed memories
+- **Automatic archival** of low-value content
+- **Explicit "pattern" tier** for proven-useful memories
+
+### Related Projects
+
+For those exploring AI memory systems:
+
+- [Roampal](https://github.com/roampal-ai/roampal) - Outcome-based learning, 5-tier memory, knowledge graphs
+- [Mem0](https://github.com/mem0ai/mem0) - Universal memory layer for AI agents
+- [Cognee](https://github.com/topoteretes/cognee) - Memory with knowledge graphs
+- [MemOS](https://github.com/MemTensor/MemOS) - Memory-native AI agent framework
+
+Each takes a different approach to the same core problem: helping AI systems remember what matters.
 
 ## License
 
