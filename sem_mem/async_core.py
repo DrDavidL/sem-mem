@@ -259,6 +259,46 @@ class AsyncSemanticMemory:
 
         return added
 
+    def save_memory(
+        self,
+        text: str,
+        kind: str = "fact",
+        metadata: Optional[Dict] = None,
+    ) -> Tuple[int, bool]:
+        """
+        Save a memory to L2 with specified kind.
+
+        This is a sync method used by consolidation and other subsystems.
+        For async usage, use remember() instead.
+
+        Args:
+            text: Memory text content
+            kind: Memory type ("fact", "pattern", "impression", "correction", etc.)
+            metadata: Additional metadata
+
+        Returns:
+            Tuple of (memory_id, is_new) where is_new is False if text already existed
+        """
+        combined_metadata = dict(metadata or {})
+        combined_metadata["kind"] = kind
+
+        # Use sync embedding via a sync OpenAI client
+        # This is acceptable for consolidation which runs offline
+        from openai import OpenAI
+        sync_client = OpenAI(api_key=self.client.api_key)
+        response = sync_client.embeddings.create(
+            model=self.embedding_model,
+            input=text,
+        )
+        vector = np.array(response.data[0].embedding)
+
+        memory_id, is_new = self.vector_index.add(text, vector, combined_metadata)
+
+        if is_new:
+            self.vector_index.save()
+
+        return memory_id, is_new
+
     def _persist_hot_items(self):
         """Save frequently accessed L1 items to L2."""
         items = self.local_cache.get_pending_persist()
