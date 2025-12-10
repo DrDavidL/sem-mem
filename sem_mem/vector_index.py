@@ -92,6 +92,15 @@ class HNSWIndex:
         self._text_to_id = {}
         self._next_id = 0
 
+    def _ensure_outcome_defaults(self, entry: dict) -> dict:
+        """Ensure outcome fields have defaults for backward compatibility."""
+        entry.setdefault("utility_score", 0.5)
+        entry.setdefault("success_count", 0)
+        entry.setdefault("failure_count", 0)
+        entry.setdefault("last_outcome_at", None)
+        entry.setdefault("is_pattern", False)
+        return entry
+
     def _load(self):
         """Load index and metadata from disk."""
         with self._lock:
@@ -126,7 +135,10 @@ class HNSWIndex:
                     UserWarning,
                 )
 
-            self._id_to_entry = {int(k): v for k, v in metadata['entries'].items()}
+            self._id_to_entry = {
+                int(k): self._ensure_outcome_defaults(v)
+                for k, v in metadata['entries'].items()
+            }
             self._text_to_id = metadata['text_to_id']
             self._next_id = metadata['next_id']
 
@@ -183,12 +195,14 @@ class HNSWIndex:
                 new_size = self._index.get_max_elements() * 2
                 self._index.resize_index(new_size)
 
-            # Store entry
+            # Store entry with outcome defaults
             entry = {
                 'text': text,
                 'vector': vector.tolist(),
                 'metadata': metadata or {}
             }
+            # Apply outcome field defaults for new entries
+            self._ensure_outcome_defaults(entry)
             self._id_to_entry[entry_id] = entry
             self._text_to_id[text] = entry_id
 
@@ -202,7 +216,7 @@ class HNSWIndex:
         query_vectors: List[np.ndarray],
         k: int = 10,
         threshold: float = 0.40,
-    ) -> List[Tuple[float, Dict]]:
+    ) -> List[Tuple[float, int, Dict]]:
         """
         Search for similar memories using multiple query vectors.
 
@@ -212,7 +226,7 @@ class HNSWIndex:
             threshold: Minimum similarity score (0-1, cosine similarity)
 
         Returns:
-            List of (score, entry) tuples, sorted by score descending
+            List of (score, memory_id, entry) tuples, sorted by score descending
         """
         with self._lock:
             current_count = self._index.get_current_count()
@@ -240,7 +254,7 @@ class HNSWIndex:
             results = []
             for entry_id, score in all_results.items():
                 if entry_id in self._id_to_entry:
-                    results.append((score, self._id_to_entry[entry_id]))
+                    results.append((score, entry_id, self._id_to_entry[entry_id]))
 
             # Sort by score descending
             results.sort(key=lambda x: x[0], reverse=True)
@@ -260,6 +274,27 @@ class HNSWIndex:
         """Check if text is already in index."""
         with self._lock:
             return text in self._text_to_id
+
+    def get_entry(self, memory_id: int) -> Optional[Dict]:
+        """Get entry by internal ID."""
+        with self._lock:
+            return self._id_to_entry.get(memory_id)
+
+    def get_entry_by_text(self, text: str) -> Optional[Tuple[int, Dict]]:
+        """Get entry by text content. Returns (id, entry) or None."""
+        with self._lock:
+            memory_id = self._text_to_id.get(text)
+            if memory_id is not None:
+                return memory_id, self._id_to_entry.get(memory_id)
+            return None
+
+    def update_entry(self, memory_id: int, **fields) -> bool:
+        """Update specific fields on an entry. Returns True if found."""
+        with self._lock:
+            if memory_id not in self._id_to_entry:
+                return False
+            self._id_to_entry[memory_id].update(fields)
+            return True
 
     def delete(self, text: str) -> bool:
         """

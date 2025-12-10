@@ -906,6 +906,7 @@ Sem-Mem is intentionally small and local. Some things it does **not** try to do:
 - **Embeddings**: OpenAI `text-embedding-3-small` (1536 dimensions, configurable)
 - **Query Expansion**: Uses `gpt-4.1-mini` to generate alternative query phrasings
 - **Cache**: Segmented LRU with Protected/Probation tiers
+- **Outcome Learning**: EWMA-based utility scoring with pattern promotion
 - **API**: OpenAI Responses API for stateful conversations
 - **Thread Safety**: RLock synchronization for concurrent access
 
@@ -953,29 +954,80 @@ Sem-Mem can be used in small production setups, but keep these in mind:
 
 In short: Sem-Mem is great for **local-first assistants, internal tools, and research agents**. If you're building a large, multi-tenant SaaS with strict SLOs, you'll likely pair Sem-Mem with more traditional infrastructure (or use a hosted vector DB directly).
 
+## Outcome-Based Learning
+
+Sem-Mem supports **outcome-based learning**—beyond just semantic similarity, the system learns which memories actually help users. Inspired by [Roampal](https://github.com/roampal-ai/roampal).
+
+### How It Works
+
+When a memory is retrieved and used, you can record whether it was helpful:
+
+```python
+from sem_mem import SemanticMemory
+
+memory = SemanticMemory(api_key="sk-...")
+
+# Retrieve memories with IDs (required for recording outcomes)
+memories, logs = memory.recall("my query", include_metadata=True)
+# Returns: [{"id": 42, "text": "...", "sim_score": 0.85, "utility_score": 0.5, ...}, ...]
+
+# After user feedback or implicit signal, record the outcome
+for mem in memories:
+    if user_found_helpful(mem):
+        memory.record_outcome(mem["id"], "success")  # Boosts future retrieval
+    else:
+        memory.record_outcome(mem["id"], "failure")  # Penalizes future retrieval
+```
+
+### Scoring Formula
+
+Utility scores are updated using EWMA (Exponentially Weighted Moving Average):
+
+```
+new_utility = 0.3 * outcome_value + 0.7 * old_utility
+```
+
+Where `outcome_value` is: `success=1.0`, `neutral=0.5`, `failure=0.0`
+
+During retrieval, the final score combines similarity and utility:
+
+```
+final_score = sim_score + 0.2 * (utility_score - 0.5)
+```
+
+This means:
+- High utility (1.0) adds +0.1 to the score
+- Low utility (0.0) subtracts -0.1 from the score
+- Neutral utility (0.5) has no effect
+
+### Pattern Promotion
+
+Memories that prove consistently useful get promoted to "pattern" status:
+
+- **Criteria**: ≥3 successful uses AND utility score ≥0.9
+- **Patterns** are flagged with `is_pattern: true` in recall results
+
+### Configuration
+
+Configurable in `sem_mem/config.py`:
+
+```python
+OUTCOME_LEARNING_ENABLED = True     # Master switch
+OUTCOME_EWMA_ALPHA = 0.3            # EWMA smoothing (higher = faster adaptation)
+OUTCOME_RETRIEVAL_ALPHA = 0.2       # Weight of utility in final score
+PATTERN_MIN_SUCCESSES = 3           # Successes needed for pattern promotion
+PATTERN_MIN_UTILITY = 0.9           # Utility threshold for pattern promotion
+```
+
+### Backward Compatibility
+
+- Existing memories get default utility scores (0.5 = neutral)
+- Default `include_metadata=False` preserves the simple string return type
+- `use_outcomes=True` by default, but can be disabled per-call
+
 ## Future Directions
 
-Sem-Mem's current approach is **similarity-based retrieval**: find memories semantically close to the query. This works well for many use cases, but there are compelling ideas from related projects worth exploring.
-
-### Outcome-Based Learning
-
-[Roampal](https://github.com/roampal-ai/roampal) introduces **outcome-tracked memory**—rather than just matching by similarity, the system learns which memories actually helped the user:
-
-- **Outcome scoring**: Memories get boosted (+0.2) when advice works, penalized (-0.3) when it fails
-- **Personalized relevance**: Over time, retrieval favors what's proven effective for *this specific user*
-- **Pattern promotion**: Memories that succeed repeatedly get promoted to permanent "pattern" storage
-
-This addresses a key limitation of pure semantic search: a memory can be *similar* to a query but not *useful* for it. Outcome learning bridges this gap.
-
-**Potential Sem-Mem integration:**
-```python
-# Future API concept (not yet implemented)
-memory.record_outcome(memory_id, "success")  # Boost this memory's retrieval score
-memory.record_outcome(memory_id, "failure")  # Penalize this memory
-
-# Retrieval would then factor in outcome history
-memories = memory.recall(query, use_outcomes=True)
-```
+Sem-Mem now supports outcome-based learning (see above). Here are additional ideas from related projects worth exploring.
 
 ### Hybrid Search
 

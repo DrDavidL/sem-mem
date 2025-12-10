@@ -81,6 +81,36 @@ ON_DELETE_THREAD_BEHAVIOR = "prompt"  # "prompt", "always_save", or "never_save"
 FAREWELL_SUMMARY_MODEL = "gpt-4.1-mini"  # Model for farewell summaries
 FAREWELL_SUMMARY_MAX_CHARS = 8000  # Safety cap for prompt content
 
+# =============================================================================
+# Outcome-Based Learning
+# =============================================================================
+# Track which memories actually help users, not just which are semantically similar.
+# Memories accumulate utility scores based on success/failure feedback.
+
+OUTCOME_LEARNING_ENABLED = True  # Master switch for outcome-based scoring
+
+# EWMA (Exponentially Weighted Moving Average) smoothing factor for utility updates
+# Higher = more weight on recent outcomes, faster adaptation
+# Lower = more stable scores, slower to change
+OUTCOME_EWMA_ALPHA = 0.3
+
+# Weight of utility score in final retrieval ranking
+# final_score = sim_score + OUTCOME_RETRIEVAL_ALPHA * (utility_score - 0.5)
+# At 0.2, a utility of 1.0 adds +0.1 to score, utility of 0.0 subtracts -0.1
+OUTCOME_RETRIEVAL_ALPHA = 0.2
+
+# Pattern promotion thresholds
+# A memory becomes a "pattern" (proven useful) when it reaches both thresholds
+PATTERN_MIN_SUCCESSES = 3  # Minimum successful retrievals
+PATTERN_MIN_UTILITY = 0.9  # Minimum utility score
+
+# Outcome value mapping for EWMA calculation
+OUTCOME_VALUES = {
+    "success": 1.0,   # Memory was helpful
+    "neutral": 0.5,   # Unknown/no feedback
+    "failure": 0.0,   # Memory was not helpful or misleading
+}
+
 
 def _load_dotenv() -> None:
     """Load .env file if it exists and python-dotenv is available."""

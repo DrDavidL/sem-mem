@@ -9,10 +9,19 @@ import aiofiles
 import numpy as np
 from openai import AsyncOpenAI
 from typing import List, Dict, Optional, Tuple
+from datetime import datetime
 from .core import SmartCache, get_memory_system_context
 from .thread_storage import ThreadStorage
 from .backup import MemoryBackup
-from .config import QUERY_EXPANSION_MODEL
+from .config import (
+    QUERY_EXPANSION_MODEL,
+    OUTCOME_LEARNING_ENABLED,
+    OUTCOME_EWMA_ALPHA,
+    OUTCOME_RETRIEVAL_ALPHA,
+    PATTERN_MIN_SUCCESSES,
+    PATTERN_MIN_UTILITY,
+    OUTCOME_VALUES,
+)
 from .vector_index import HNSWIndex
 
 
@@ -257,7 +266,9 @@ class AsyncSemanticMemory:
         limit: int = 3,
         threshold: float = 0.40,
         expand_query: bool = True,
-    ) -> Tuple[List[str], List[str]]:
+        use_outcomes: bool = True,
+        include_metadata: bool = False,
+    ) -> Tuple[List, List[str]]:
         """
         Retrieve relevant memories using semantic search.
 
@@ -266,10 +277,21 @@ class AsyncSemanticMemory:
             limit: Maximum number of results to return
             threshold: Minimum similarity score (0-1)
             expand_query: If True, use LLM to generate alternative query phrasings
+            use_outcomes: If True, adjust scores based on utility_score (default True)
+            include_metadata: If True, return rich dicts with id, scores, etc.
+                             If False (default), return list of text strings.
 
         Returns:
-            Tuple of (memories, logs) where memories are formatted for display.
-            Corrections are placed last so the model sees them as most recent.
+            If include_metadata=False (default):
+                Tuple of (memories, logs) where memories is list of text strings.
+            If include_metadata=True:
+                Tuple of (memories, logs) where memories is list of dicts with:
+                    - id: memory_id for use with record_outcome()
+                    - text: memory text
+                    - sim_score: raw similarity score
+                    - utility_score: outcome-based utility (0-1)
+                    - final_score: combined score used for ranking
+                    - is_pattern: whether this memory is a "proven useful" pattern
 
         Invariant: if both an older fact and a newer correction are retrieved,
         the model should see the correction after the older fact, treating it as overriding.
@@ -307,13 +329,31 @@ class AsyncSemanticMemory:
             _, status, _ = self.local_cache.get(best_hit['text'])
             logs.append(f"⚡ L1 HIT ({status}) | Conf: {l1_hits[0][0]:.2f}")
             self._persist_hot_items()
-            raw_memories = [x[1]['text'] for x in l1_hits[:limit]]
-            return self._format_memories_for_display(raw_memories), logs
+
+            if include_metadata:
+                # For L1 hits, we need to look up memory_id from index
+                result_dicts = []
+                for score, item in l1_hits[:limit]:
+                    entry_info = self.vector_index.get_entry_by_text(item['text'])
+                    memory_id = entry_info[0] if entry_info else None
+                    utility = item.get('utility_score', 0.5)
+                    result_dicts.append({
+                        "id": memory_id,
+                        "text": item['text'],
+                        "sim_score": round(score, 4),
+                        "utility_score": round(utility, 4),
+                        "final_score": round(score, 4),  # No adjustment for L1 hits
+                        "is_pattern": item.get('is_pattern', False),
+                    })
+                return result_dicts, logs
+            else:
+                raw_memories = [x[1]['text'] for x in l1_hits[:limit]]
+                return self._format_memories_for_display(raw_memories), logs
 
         # --- TIER 2: Search HNSW Index ---
         logs.append("🔍 L1 Miss... Searching HNSW index...")
 
-        # Search HNSW with all query variants (sync - very fast)
+        # Search HNSW with all query variants - returns (score, memory_id, entry) tuples
         results = self.vector_index.search(
             query_vectors=query_vecs,
             k=limit * 2,
@@ -321,22 +361,52 @@ class AsyncSemanticMemory:
         )
 
         if not results:
+            if include_metadata:
+                return [], logs
             return [], logs
 
+        # Apply outcome-based scoring adjustment
+        if use_outcomes and OUTCOME_LEARNING_ENABLED:
+            adjusted = []
+            for sim_score, memory_id, entry in results:
+                utility = entry.get("utility_score", 0.5)
+                # final_score = sim_score + alpha * (utility - 0.5)
+                final_score = sim_score + OUTCOME_RETRIEVAL_ALPHA * (utility - 0.5)
+                adjusted.append((final_score, sim_score, memory_id, entry))
+            adjusted.sort(key=lambda x: x[0], reverse=True)
+            logs.append("📊 Applied outcome scoring")
+        else:
+            # No adjustment - keep original scores
+            adjusted = [(sim_score, sim_score, memory_id, entry) for sim_score, memory_id, entry in results]
+
         # Limit results
-        top_results = results[:limit]
+        top_results = adjusted[:limit]
 
         # Promote to L1 cache
         promoted = 0
-        for score, item in top_results:
-            self.local_cache.add(item)
+        for _, _, _, entry in top_results:
+            self.local_cache.add(entry)
             promoted += 1
 
         if promoted:
             logs.append(f"🔼 Promoted {promoted} to Probation.")
 
-        raw_memories = [item['text'] for _, item in top_results]
-        return self._format_memories_for_display(raw_memories), logs
+        # Format output
+        if include_metadata:
+            return [
+                {
+                    "id": memory_id,
+                    "text": entry["text"],
+                    "sim_score": round(sim_score, 4),
+                    "utility_score": round(entry.get("utility_score", 0.5), 4),
+                    "final_score": round(final_score, 4),
+                    "is_pattern": entry.get("is_pattern", False),
+                }
+                for final_score, sim_score, memory_id, entry in top_results
+            ], logs
+        else:
+            raw_memories = [entry["text"] for _, _, _, entry in top_results]
+            return self._format_memories_for_display(raw_memories), logs
 
     def _format_memories_for_display(self, memories: List[str]) -> List[str]:
         """
@@ -479,6 +549,91 @@ class AsyncSemanticMemory:
             "l2_memories": self.vector_index.get_entry_count(),
             "l1_cache_size": len(list(self.local_cache)),
         }
+
+    def record_outcome(
+        self,
+        memory_id: int,
+        outcome: str,
+        metadata: Optional[Dict] = None,
+    ) -> Dict:
+        """
+        Record whether a retrieved memory was helpful.
+
+        This updates the memory's utility_score using EWMA (Exponentially Weighted
+        Moving Average), allowing the system to learn which memories actually help
+        users rather than just which are semantically similar.
+
+        Note: This is a sync method since the index operations are fast.
+
+        Args:
+            memory_id: Internal ID from recall results (with include_metadata=True)
+            outcome: "success" (memory helped), "failure" (memory was unhelpful),
+                    or "neutral" (no clear signal)
+            metadata: Optional context about the outcome (reserved for future use)
+
+        Returns:
+            Updated entry dict with new utility scores:
+                - utility_score: EWMA-smoothed utility (0-1)
+                - success_count: Total successful retrievals
+                - failure_count: Total failed retrievals
+                - last_outcome_at: ISO timestamp of this update
+                - is_pattern: True if promoted to "proven useful" tier
+
+        Raises:
+            ValueError: If outcome is not "success", "failure", or "neutral"
+            KeyError: If memory_id not found in index
+
+        Example:
+            # Get memories with IDs
+            memories, logs = await memory.recall("my query", include_metadata=True)
+
+            # After user feedback or implicit signal
+            for mem in memories:
+                if user_found_helpful(mem):
+                    memory.record_outcome(mem["id"], "success")
+                else:
+                    memory.record_outcome(mem["id"], "failure")
+        """
+        if outcome not in OUTCOME_VALUES:
+            raise ValueError(
+                f"Invalid outcome: {outcome}. Must be one of {list(OUTCOME_VALUES.keys())}"
+            )
+
+        entry = self.vector_index.get_entry(memory_id)
+        if not entry:
+            raise KeyError(f"Memory not found: {memory_id}")
+
+        # EWMA update: new = alpha * value + (1 - alpha) * old
+        old_utility = entry.get("utility_score", 0.5)
+        value = OUTCOME_VALUES[outcome]
+        new_utility = OUTCOME_EWMA_ALPHA * value + (1 - OUTCOME_EWMA_ALPHA) * old_utility
+
+        # Update counts
+        success_count = entry.get("success_count", 0)
+        failure_count = entry.get("failure_count", 0)
+        if outcome == "success":
+            success_count += 1
+        elif outcome == "failure":
+            failure_count += 1
+
+        # Check for pattern promotion
+        is_pattern = entry.get("is_pattern", False)
+        if not is_pattern:
+            if success_count >= PATTERN_MIN_SUCCESSES and new_utility >= PATTERN_MIN_UTILITY:
+                is_pattern = True
+
+        # Apply updates
+        updates = {
+            "utility_score": new_utility,
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "last_outcome_at": datetime.now().isoformat(),
+            "is_pattern": is_pattern,
+        }
+        self.vector_index.update_entry(memory_id, **updates)
+        self.vector_index.save()  # Persist changes
+
+        return {**entry, **updates}
 
     # ==========================================================================
     # Thread Persistence Methods (async file I/O)
