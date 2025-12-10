@@ -135,9 +135,9 @@ CONSOLIDATION_FREQUENCY = "daily"  # "hourly" | "daily" | "manual"
 
 # Objectives passed to LLM (explicit, designer-defined, not self-generated)
 CONSOLIDATION_OBJECTIVES = [
-    "reduce redundancy",
-    "promote stable preferences and principles",
-    "highlight contradictions for human review",
+    "reduce redundancy in stored memories",
+    "promote stable preferences and principles that help future interactions",
+    "highlight contradictions or inconsistencies for human review (do not auto-resolve)",
 ]
 
 

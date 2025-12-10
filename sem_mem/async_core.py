@@ -21,8 +21,11 @@ from .config import (
     PATTERN_MIN_SUCCESSES,
     PATTERN_MIN_UTILITY,
     OUTCOME_VALUES,
+    get_api_key,
+    DEFAULT_CHAT_PROVIDER,
 )
 from .vector_index import HNSWIndex
+from .providers import get_chat_provider
 
 
 class AsyncSemanticMemory:
@@ -49,7 +52,10 @@ class AsyncSemanticMemory:
         include_file_access: bool = False,
         web_search: bool = False,
     ):
-        self.client = AsyncOpenAI(api_key=api_key)
+        # Resolve API key
+        resolved_api_key = api_key or get_api_key(provider=DEFAULT_CHAT_PROVIDER)
+
+        self.client = AsyncOpenAI(api_key=resolved_api_key)
         self.storage_dir = storage_dir
         self.instructions_file = os.path.join(storage_dir, "instructions.txt")
         self.embedding_model = embedding_model
@@ -61,6 +67,12 @@ class AsyncSemanticMemory:
         self.include_memory_context = include_memory_context
         self.include_file_access = include_file_access
         self.web_search_enabled = web_search
+
+        # Initialize sync chat provider for consolidator and other sync operations
+        self._chat_provider = get_chat_provider(
+            DEFAULT_CHAT_PROVIDER,
+            api_key=resolved_api_key,
+        )
 
         # Semaphore to limit concurrent API calls
         self._embedding_semaphore = asyncio.Semaphore(max_concurrent_embeddings)

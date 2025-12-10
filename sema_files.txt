@@ -20,3 +20,6 @@ pyproject.toml
 
 /
 plan.md
+sem_mem/core.py
+sem_mem/vector_index.py
+sem_mem/consolidation.py

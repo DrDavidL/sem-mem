@@ -178,6 +178,9 @@ class Consolidator:
 
         user_prompt = f"Here are the memories to analyze:\n\n{memories_text}"
 
+        logger.debug(f"Consolidator calling LLM with model={self.model}")
+        logger.debug(f"System prompt length: {len(system_prompt)}, User prompt length: {len(user_prompt)}")
+
         try:
             # Use the memory's chat provider
             response = self.memory._chat_provider.chat(
@@ -185,10 +188,16 @@ class Consolidator:
                 model=self.model,
                 instructions=system_prompt,
             )
+            logger.debug(f"LLM response type: {type(response)}")
+            logger.debug(f"LLM response: {response}")
+            if response:
+                logger.debug(f"Response has text attr: {hasattr(response, 'text')}")
+                if hasattr(response, 'text'):
+                    logger.debug(f"Response.text: {response.text[:200] if response.text else 'None/Empty'}...")
             # Return the text content from the ChatResponse
             return response.text if response else None
         except Exception as e:
-            logger.error(f"Consolidator LLM call failed: {e}")
+            logger.error(f"Consolidator LLM call failed: {e}", exc_info=True)
             return None
 
     def _parse_output(self, llm_output: str) -> Dict:
