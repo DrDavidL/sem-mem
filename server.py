@@ -6,7 +6,7 @@ Run with: uvicorn server:app --reload
 
 from contextlib import asynccontextmanager
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sem_mem.async_core import AsyncSemanticMemory
@@ -393,6 +393,38 @@ async def save_thread(
     )
 
     return {"chunks_saved": count}
+
+
+@app.post("/consolidate")
+async def run_consolidation(
+    dry_run: Optional[bool] = Query(None, description="Override dry_run setting"),
+    memory=Depends(get_memory),
+):
+    """
+    Run a single memory consolidation pass.
+
+    Consolidation analyzes recent and sampled memories to:
+    - Create patterns from recurring themes
+    - Demote redundant memories
+    - Flag contradictions for human review
+
+    Args:
+        dry_run: If provided, overrides the CONSOLIDATION_DRY_RUN config.
+                 True = analyze only, False = apply changes.
+
+    Returns:
+        Statistics about the consolidation run.
+    """
+    from sem_mem.consolidation import Consolidator
+
+    config = {}
+    if dry_run is not None:
+        config["dry_run"] = dry_run
+
+    consolidator = Consolidator(memory, config=config)
+    stats = consolidator.run_once()
+
+    return stats
 
 
 if __name__ == "__main__":

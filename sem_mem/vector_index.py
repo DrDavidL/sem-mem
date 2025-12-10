@@ -6,8 +6,10 @@ Replaces LSH with hnswlib for better recall and performance at scale.
 
 import os
 import json
+import random
 import threading
 import warnings
+from datetime import datetime
 import numpy as np
 import hnswlib
 from typing import List, Dict, Optional, Tuple
@@ -93,12 +95,15 @@ class HNSWIndex:
         self._next_id = 0
 
     def _ensure_outcome_defaults(self, entry: dict) -> dict:
-        """Ensure outcome fields have defaults for backward compatibility."""
+        """Ensure outcome and timestamp fields have defaults for backward compatibility."""
         entry.setdefault("utility_score", 0.5)
         entry.setdefault("success_count", 0)
         entry.setdefault("failure_count", 0)
         entry.setdefault("last_outcome_at", None)
         entry.setdefault("is_pattern", False)
+        # created_at: fallback to last_outcome_at if present, else current time
+        if "created_at" not in entry:
+            entry["created_at"] = entry.get("last_outcome_at") or datetime.now().isoformat()
         return entry
 
     def _load(self):
@@ -195,11 +200,12 @@ class HNSWIndex:
                 new_size = self._index.get_max_elements() * 2
                 self._index.resize_index(new_size)
 
-            # Store entry with outcome defaults
+            # Store entry with outcome defaults and created_at timestamp
             entry = {
                 'text': text,
                 'vector': vector.tolist(),
-                'metadata': metadata or {}
+                'metadata': metadata or {},
+                'created_at': datetime.now().isoformat(),
             }
             # Apply outcome field defaults for new entries
             self._ensure_outcome_defaults(entry)
@@ -311,6 +317,61 @@ class HNSWIndex:
             del self._id_to_entry[entry_id]
             # Note: Can't remove from hnswlib, but search won't return it
             return True
+
+    def get_recent_memories(self, limit: int = 50) -> List[Dict]:
+        """
+        Get most recently created memories.
+
+        Args:
+            limit: Maximum number of memories to return
+
+        Returns:
+            List of memory dicts with 'id' field included, sorted by created_at descending.
+            Each dict contains: id, text, metadata, utility_score, created_at, etc.
+        """
+        with self._lock:
+            entries = list(self._id_to_entry.items())
+            # Sort by created_at descending (fallback to last_outcome_at if created_at missing)
+            entries.sort(
+                key=lambda kv: kv[1].get("created_at") or kv[1].get("last_outcome_at") or "",
+                reverse=True,
+            )
+            return [
+                {"id": mem_id, **entry}
+                for mem_id, entry in entries[:limit]
+            ]
+
+    def sample_memories(
+        self,
+        limit: int = 50,
+        exclude_ids: Optional[List[int]] = None,
+    ) -> List[Dict]:
+        """
+        Random sample of memories, excluding specified IDs.
+
+        Args:
+            limit: Maximum number of memories to return
+            exclude_ids: Memory IDs to exclude from sampling
+
+        Returns:
+            List of memory dicts with 'id' field included.
+            Each dict contains: id, text, metadata, utility_score, created_at, etc.
+        """
+        with self._lock:
+            exclude_set = set(exclude_ids or [])
+            candidates = [
+                (mem_id, entry)
+                for mem_id, entry in self._id_to_entry.items()
+                if mem_id not in exclude_set
+            ]
+            sample_size = min(limit, len(candidates))
+            if sample_size == 0:
+                return []
+            sampled = random.sample(candidates, k=sample_size)
+            return [
+                {"id": mem_id, **entry}
+                for mem_id, entry in sampled
+            ]
 
 
 def migrate_lsh_to_hnsw(storage_dir: str, embedding_dim: int = 1536) -> int:

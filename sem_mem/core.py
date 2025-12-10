@@ -4,7 +4,7 @@ from datetime import datetime
 import numpy as np
 from collections import OrderedDict
 from pypdf import PdfReader
-from typing import List, Dict, Optional, TYPE_CHECKING
+from typing import List, Dict, Optional, Tuple, TYPE_CHECKING
 
 from .config import (
     QUERY_EXPANSION_MODEL,
@@ -481,6 +481,37 @@ class SemanticMemory:
             msg += " & Promoted to Hot Cache."
 
         return msg
+
+    def save_memory(
+        self,
+        text: str,
+        kind: str = "fact",
+        metadata: Optional[Dict] = None,
+    ) -> Tuple[int, bool]:
+        """
+        Save a memory to L2 with specified kind.
+
+        This is the unified entry point for storing memories, used by
+        consolidation, auto-memory, and other subsystems.
+
+        Args:
+            text: Memory text content
+            kind: Memory type ("fact", "pattern", "impression", "correction", etc.)
+            metadata: Additional metadata
+
+        Returns:
+            Tuple of (memory_id, is_new) where is_new is False if text already existed
+        """
+        combined_metadata = dict(metadata or {})
+        combined_metadata["kind"] = kind
+
+        vector = self._get_embedding(text)
+        memory_id, is_new = self.vector_index.add(text, vector, combined_metadata)
+
+        if is_new:
+            self.vector_index.save()
+
+        return memory_id, is_new
 
     def _persist_hot_items(self):
         """Save frequently accessed L1 items to L2 for long-term storage."""

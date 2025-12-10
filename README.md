@@ -457,6 +457,7 @@ When running the FastAPI server:
 | `/model` | GET/PUT | View/update model configuration |
 | `/upload/pdf` | POST | Ingest PDF document |
 | `/threads/save` | POST | Save conversation to L2 |
+| `/consolidate` | POST | Run memory consolidation pass |
 
 API documentation available at `http://localhost:8000/docs` when server is running.
 
@@ -1024,6 +1025,95 @@ PATTERN_MIN_UTILITY = 0.9           # Utility threshold for pattern promotion
 - Existing memories get default utility scores (0.5 = neutral)
 - Default `include_metadata=False` preserves the simple string return type
 - `use_outcomes=True` by default, but can be disabled per-call
+
+## Memory Consolidation
+
+Sem-Mem includes an offline **consolidation worker** that periodically reviews memories to create patterns, reduce redundancy, and flag contradictions. This is inspired by how human memory consolidation works during sleep—distilling experiences into stable knowledge.
+
+### What Consolidation Does
+
+1. **Pattern Creation**: Identifies recurring themes across memories and creates higher-level "pattern" memories
+2. **Demotion**: Reduces utility scores of redundant or superseded memories (via synthetic failure outcomes)
+3. **Contradiction Detection**: Flags conflicting memories for human review
+
+### Running Consolidation
+
+Consolidation is triggered externally (via API or cron), not automatically:
+
+```bash
+# Dry run (analyze only, no changes)
+curl -X POST "http://localhost:8000/consolidate"
+
+# Apply changes
+curl -X POST "http://localhost:8000/consolidate?dry_run=false"
+```
+
+Or via Python:
+
+```python
+from sem_mem.consolidation import Consolidator
+
+consolidator = Consolidator(memory, config={"dry_run": False})
+stats = consolidator.run_once()
+# {"patterns_created": 2, "demotions": 5, "contradictions_flagged": 1, "memories_reviewed": 100}
+```
+
+### How It Works
+
+1. **Memory Selection**: Reviews recent memories (default: 50) plus a random sample of older memories (default: 50)
+2. **LLM Analysis**: Uses `gpt-4.1-mini` to analyze the memory set with designer-defined objectives
+3. **Pattern Deduplication**: Before creating a new pattern, checks if a similar one exists (0.85 similarity threshold)
+4. **Demotion via Outcomes**: Uses existing `record_outcome(id, "failure")` to reduce utility scores
+5. **Contradiction Storage**: Writes conflicts to `contradictions.json` for human review
+
+### Configuration
+
+```python
+# sem_mem/config.py
+
+CONSOLIDATION_ENABLED = True
+CONSOLIDATION_DRY_RUN = True          # Analyze but don't write (flip to False after tuning)
+CONSOLIDATION_RECENT_LIMIT = 50       # Recent memories to review
+CONSOLIDATION_COLD_SAMPLE = 50        # Random older memories to sample
+CONSOLIDATION_MAX_NEW_PATTERNS = 5    # Cap pattern creation per run
+CONSOLIDATION_MODEL = "gpt-4.1-mini"  # Model for analysis
+CONSOLIDATION_FREQUENCY = "daily"     # Advisory (scheduling is external)
+
+CONSOLIDATION_OBJECTIVES = [
+    "reduce redundancy",
+    "promote stable preferences and principles",
+    "highlight contradictions for human review",
+]
+```
+
+### Dry Run Mode
+
+By default, `CONSOLIDATION_DRY_RUN = True`. This lets you see what consolidation would do without making changes:
+
+```python
+stats = consolidator.run_once()
+# Patterns proposed, demotions identified, contradictions found
+# But nothing written to the index
+```
+
+Set `dry_run=False` (via config or API parameter) after you're comfortable with the analysis.
+
+### Contradictions File
+
+When contradictions are detected, they're stored in `local_memory/contradictions.json`:
+
+```json
+[
+  {
+    "ids": [42, 87],
+    "summary": "Memory 42 says user prefers morning meetings, but memory 87 says user prefers afternoon meetings",
+    "status": "pending_review",
+    "detected_at": "2025-12-09T10:30:00Z"
+  }
+]
+```
+
+Review and resolve contradictions manually, then update or delete the conflicting memories.
 
 ## Future Directions
 

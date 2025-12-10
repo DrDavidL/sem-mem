@@ -111,6 +111,35 @@ OUTCOME_VALUES = {
     "failure": 0.0,   # Memory was not helpful or misleading
 }
 
+# =============================================================================
+# Memory Consolidation
+# =============================================================================
+# Offline routine that reviews memories to create patterns and reduce redundancy.
+# Runs periodically (external scheduling) to distill stable preferences/principles.
+
+CONSOLIDATION_ENABLED = True
+CONSOLIDATION_DRY_RUN = True  # Analyze but don't write (flip to False after tuning)
+
+# Memory selection limits
+CONSOLIDATION_RECENT_LIMIT = 50    # How many recent memories to review
+CONSOLIDATION_COLD_SAMPLE = 50     # How many older memories to sample randomly
+
+# Output limits per run
+CONSOLIDATION_MAX_NEW_PATTERNS = 5  # Cap pattern creation per run
+
+# Model for consolidation analysis
+CONSOLIDATION_MODEL = "gpt-4.1-mini"
+
+# Scheduling (advisory; actual scheduling is external via cron/script)
+CONSOLIDATION_FREQUENCY = "daily"  # "hourly" | "daily" | "manual"
+
+# Objectives passed to LLM (explicit, designer-defined, not self-generated)
+CONSOLIDATION_OBJECTIVES = [
+    "reduce redundancy",
+    "promote stable preferences and principles",
+    "highlight contradictions for human review",
+]
+
 
 def _load_dotenv() -> None:
     """Load .env file if it exists and python-dotenv is available."""
