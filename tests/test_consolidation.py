@@ -172,9 +172,11 @@ class TestConsolidator:
         memory.record_outcome = Mock()
         memory.recall = Mock(return_value=([], []))
 
-        # Mock chat provider
+        # Mock chat provider - return a mock ChatResponse with .text attribute
+        mock_response = Mock()
+        mock_response.text = '{"patterns": [], "demotions": [], "contradictions": []}'
         memory._chat_provider = Mock()
-        memory._chat_provider.chat = Mock(return_value='{"patterns": [], "demotions": [], "contradictions": []}')
+        memory._chat_provider.chat = Mock(return_value=mock_response)
 
         return memory
 
@@ -199,15 +201,21 @@ class TestConsolidator:
         # 2 recent + 1 cold = 3 total
         assert stats["memories_reviewed"] == 3
 
+    def _mock_chat_response(self, mock_memory, text: str):
+        """Helper to set up mock chat provider response with .text attribute."""
+        mock_response = Mock()
+        mock_response.text = text
+        mock_memory._chat_provider.chat.return_value = mock_response
+
     def test_dry_run_does_not_call_save(self, mock_memory):
         """In dry run mode, no saves should occur."""
-        mock_memory._chat_provider.chat.return_value = '''
+        self._mock_chat_response(mock_memory, '''
         {
             "patterns": [{"text": "User prefers mornings", "source_ids": [1], "reasoning": "test"}],
             "demotions": [],
             "contradictions": []
         }
-        '''
+        ''')
 
         consolidator = Consolidator(mock_memory, config={"dry_run": True})
         stats = consolidator.run_once()
@@ -219,13 +227,13 @@ class TestConsolidator:
 
     def test_non_dry_run_calls_save(self, mock_memory):
         """With dry_run=False, saves should occur."""
-        mock_memory._chat_provider.chat.return_value = '''
+        self._mock_chat_response(mock_memory, '''
         {
             "patterns": [{"text": "User prefers mornings", "source_ids": [1], "reasoning": "test"}],
             "demotions": [],
             "contradictions": []
         }
-        '''
+        ''')
 
         consolidator = Consolidator(mock_memory, config={"dry_run": False})
         stats = consolidator.run_once()
@@ -237,13 +245,13 @@ class TestConsolidator:
 
     def test_demotion_calls_record_outcome_failure(self, mock_memory):
         """Demotions should call record_outcome with 'failure'."""
-        mock_memory._chat_provider.chat.return_value = '''
+        self._mock_chat_response(mock_memory, '''
         {
             "patterns": [],
             "demotions": [{"memory_id": 1, "reason": "superseded"}],
             "contradictions": []
         }
-        '''
+        ''')
 
         consolidator = Consolidator(mock_memory, config={"dry_run": False})
         stats = consolidator.run_once()
@@ -256,13 +264,13 @@ class TestConsolidator:
 
     def test_dry_run_demotion_does_not_call_record_outcome(self, mock_memory):
         """In dry run, demotions should not call record_outcome."""
-        mock_memory._chat_provider.chat.return_value = '''
+        self._mock_chat_response(mock_memory, '''
         {
             "patterns": [],
             "demotions": [{"memory_id": 1, "reason": "superseded"}],
             "contradictions": []
         }
-        '''
+        ''')
 
         consolidator = Consolidator(mock_memory, config={"dry_run": True})
         stats = consolidator.run_once()
@@ -272,13 +280,13 @@ class TestConsolidator:
 
     def test_pattern_dedup_skips_existing(self, mock_memory):
         """Should skip pattern creation if similar pattern exists."""
-        mock_memory._chat_provider.chat.return_value = '''
+        self._mock_chat_response(mock_memory, '''
         {
             "patterns": [{"text": "User likes mornings", "source_ids": [1], "reasoning": "test"}],
             "demotions": [],
             "contradictions": []
         }
-        '''
+        ''')
         # Mock recall to return an existing pattern
         mock_memory.recall.return_value = (
             [{"id": 99, "text": "User prefers mornings", "metadata": {"kind": "pattern"}}],
@@ -296,13 +304,13 @@ class TestConsolidator:
 
     def test_contradictions_stored_to_file(self, mock_memory):
         """Contradictions should be stored to contradictions.json."""
-        mock_memory._chat_provider.chat.return_value = '''
+        self._mock_chat_response(mock_memory, '''
         {
             "patterns": [],
             "demotions": [],
             "contradictions": [{"ids": [1, 2], "summary": "Conflicting preferences"}]
         }
-        '''
+        ''')
 
         consolidator = Consolidator(mock_memory, config={"dry_run": False})
         stats = consolidator.run_once()

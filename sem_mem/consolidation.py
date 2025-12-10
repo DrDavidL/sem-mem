@@ -183,9 +183,10 @@ class Consolidator:
             response = self.memory._chat_provider.chat(
                 messages=[{"role": "user", "content": user_prompt}],
                 model=self.model,
-                system=system_prompt,
+                instructions=system_prompt,
             )
-            return response
+            # Return the text content from the ChatResponse
+            return response.text if response else None
         except Exception as e:
             logger.error(f"Consolidator LLM call failed: {e}")
             return None
