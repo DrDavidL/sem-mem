@@ -14,7 +14,7 @@ import re
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, List, Tuple, Any, TYPE_CHECKING
+from typing import Optional, List, Tuple, Any, TYPE_CHECKING, NamedTuple
 
 from .config import QUERY_EXPANSION_MODEL
 
@@ -119,6 +119,227 @@ CORRECTION_PATTERNS = [
     r"\bon\s+second\s+thought\b",
     r"\bscratch\s+that\b",
 ]
+
+# =============================================================================
+# Thread-Level Heuristics (Phase 1 Enhancement)
+# =============================================================================
+
+# Question-like patterns (detect Q&A threads)
+QUESTION_PATTERNS = [
+    r"\?$",                              # Ends with question mark
+    r"^how\s+(do|can|should|would)\s+i\b",
+    r"^why\s+(is|does|did|are|was|were)\b",
+    r"^can\s+you\s+(help|explain|show)\b",
+    r"^what\s+(is|are|does|should|would)\b",
+    r"^where\s+(is|are|do|can)\b",
+    r"^when\s+(should|do|did|will)\b",
+    r"^is\s+(there|it|this)\b",
+    r"^could\s+you\b",
+    r"^would\s+you\b",
+]
+
+# Completion tokens (indicate resolved problem-solving)
+COMPLETION_PATTERNS = [
+    r"\bthanks?\b",
+    r"\bthank\s+you\b",
+    r"\bthat\s+worked\b",
+    r"\bgot\s+it\b",
+    r"\bperfect\b",
+    r"\bresolved\b",
+    r"\bfixed\s+it\b",
+    r"\bproblem\s+solved\b",
+    r"\bexcellent\b",
+    r"\bawesome\b",
+    r"\bgreat,?\s+that\b",
+    r"\bmakes\s+sense\b",
+]
+
+# Refinement patterns (indicate iterative problem-solving)
+REFINEMENT_PATTERNS = [
+    r"^actually\b",
+    r"^instead\b",
+    r"^what\s+about\b",
+    r"^wait\b",
+    r"^let\s+me\s+clarify\b",
+    r"^sorry,?\s+i\s+meant\b",
+    r"^no,?\s+i\s+mean\b",
+    r"^to\s+clarify\b",
+    r"^one\s+more\s+thing\b",
+    r"^also\b",
+    r"^but\s+what\s+if\b",
+    r"^follow.?up\b",
+]
+
+# Meta-noise patterns (low-value interactions to down-rank)
+META_NOISE_PATTERNS = [
+    r"^hi$",
+    r"^hello$",
+    r"^hey$",
+    r"^test$",
+    r"^testing$",
+    r"^ok$",
+    r"^okay$",
+    r"^k$",
+    r"^yes$",
+    r"^no$",
+    r"^you\s+there\??$",
+    r"^thanks$",              # Standalone thanks without context
+    r"^thank\s+you$",         # Standalone thank you without context
+    r"^cool$",
+    r"^nice$",
+    r"^good$",
+    r"^\.\.\.$",
+    r"^nevermind$",
+    r"^nvm$",
+]
+
+
+class HeuristicSignals(NamedTuple):
+    """
+    Structured heuristic evaluation for a thread/exchange.
+
+    Used to compute memory-worthiness score from cheap signals
+    without any LLM calls.
+    """
+    is_qa_like: bool           # Thread contains question-like patterns
+    has_completion_token: bool  # Thread ends with completion signal
+    turn_count: int            # Number of user turns in thread
+    has_refinements: bool      # User refined/clarified during thread
+    is_meta_noise: bool        # Exchange is low-value meta interaction
+    has_identity: bool         # Contains identity statements
+    has_preference: bool       # Contains preference statements
+    has_correction: bool       # Contains correction statements
+
+
+def _matches_any_pattern(text: str, patterns: List[str]) -> bool:
+    """Check if text matches any pattern in the list."""
+    text_lower = text.lower().strip()
+    return any(re.search(p, text_lower, re.IGNORECASE) for p in patterns)
+
+
+def _is_question_like(text: str) -> bool:
+    """Check if text looks like a question."""
+    return _matches_any_pattern(text, QUESTION_PATTERNS)
+
+
+def _has_completion_token(text: str) -> bool:
+    """Check if text contains completion/resolution signals."""
+    return _matches_any_pattern(text, COMPLETION_PATTERNS)
+
+
+def _has_refinement(text: str) -> bool:
+    """Check if text indicates refinement/clarification."""
+    return _matches_any_pattern(text, REFINEMENT_PATTERNS)
+
+
+def _is_meta_noise(text: str) -> bool:
+    """Check if text is low-value meta interaction."""
+    # Must match the ENTIRE message (short, standalone)
+    text_clean = text.lower().strip()
+    # Only consider short messages as potential noise
+    if len(text_clean) > 50:
+        return False
+    return _matches_any_pattern(text_clean, META_NOISE_PATTERNS)
+
+
+def compute_thread_heuristics(messages: List[dict]) -> HeuristicSignals:
+    """
+    Analyze a full thread for memory-worthiness signals.
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys
+
+    Returns:
+        HeuristicSignals with detected patterns
+    """
+    user_messages = [m["content"] for m in messages if m.get("role") == "user"]
+    turn_count = len(user_messages)
+
+    if not user_messages:
+        return HeuristicSignals(
+            is_qa_like=False,
+            has_completion_token=False,
+            turn_count=0,
+            has_refinements=False,
+            is_meta_noise=True,
+            has_identity=False,
+            has_preference=False,
+            has_correction=False,
+        )
+
+    # Check if any early message is question-like
+    is_qa_like = any(_is_question_like(msg) for msg in user_messages[:-1]) if len(user_messages) > 1 else _is_question_like(user_messages[0])
+
+    # Check if final user message has completion token
+    last_user_msg = user_messages[-1]
+    has_completion = _has_completion_token(last_user_msg)
+
+    # Check for refinements in any user message
+    has_refinements = any(_has_refinement(msg) for msg in user_messages)
+
+    # Check if the entire exchange is meta-noise
+    # Only true if ALL user messages are noise AND total content is very short
+    all_messages_noise = all(_is_meta_noise(msg) for msg in user_messages)
+    total_content = " ".join(user_messages)
+    is_meta_noise = all_messages_noise and len(total_content) < 100
+
+    # Check for high-value content types
+    combined_user_text = " ".join(user_messages)
+    has_identity = looks_like_identity(combined_user_text)
+    has_preference = looks_like_preference(combined_user_text)
+    has_correction = looks_like_correction(combined_user_text)
+
+    return HeuristicSignals(
+        is_qa_like=is_qa_like,
+        has_completion_token=has_completion,
+        turn_count=turn_count,
+        has_refinements=has_refinements,
+        is_meta_noise=is_meta_noise,
+        has_identity=has_identity,
+        has_preference=has_preference,
+        has_correction=has_correction,
+    )
+
+
+def compute_thread_heuristic_score(signals: HeuristicSignals) -> float:
+    """
+    Compute memory-worthiness score from heuristic signals.
+
+    Formula: base + qa_bonus + completion_bonus + turn_bonus + content_bonus - noise_penalty
+
+    Args:
+        signals: HeuristicSignals from compute_thread_heuristics()
+
+    Returns:
+        Float 0.0-1.0 representing memory-worthiness
+    """
+    score = 0.3  # Base score
+
+    # Resolved Q&A is high value
+    if signals.is_qa_like and signals.has_completion_token:
+        score += 0.3
+
+    # Multi-turn bonus (capped at +0.3)
+    if signals.turn_count >= 3:
+        score += 0.1 * min(signals.turn_count - 2, 3)
+
+    # Iterative refinement is valuable
+    if signals.has_refinements:
+        score += 0.15
+
+    # High-value content types
+    if signals.has_identity:
+        score += 0.25
+    if signals.has_preference:
+        score += 0.2
+    if signals.has_correction:
+        score += 0.3  # Corrections are very important to remember
+
+    # Heavy penalty for noise
+    if signals.is_meta_noise:
+        score -= 0.5
+
+    return max(0.0, min(1.0, score))
 
 
 def looks_like_preference(text: str) -> bool:

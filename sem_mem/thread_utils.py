@@ -9,10 +9,17 @@ This module just provides helpers for:
 - Title generation
 - Token estimation
 - Conversation summarization (for windowing and deletion)
+- Thread completion detection (heuristics)
 """
 
 import json
 from typing import List, Dict, Optional, TYPE_CHECKING, Union
+
+from .auto_memory import (
+    HeuristicSignals,
+    compute_thread_heuristics,
+    compute_thread_heuristic_score,
+)
 
 from .config import (
     AUTO_THREAD_RENAME_MODEL,
@@ -532,3 +539,114 @@ def summarize_deleted_thread(
         return summary.strip()
     except Exception:
         return ""
+
+
+# =============================================================================
+# Thread Completion Detection (Phase 1 Enhancement)
+# =============================================================================
+
+def is_thread_completed(messages: List[Dict]) -> bool:
+    """
+    Detect if a thread appears to be a completed Q&A interaction.
+
+    A thread is considered "completed" if:
+    - It started with a question-like message
+    - The final user message contains a completion token (thanks, got it, etc.)
+
+    This is useful for deciding when a thread is worth saving to long-term memory.
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys
+
+    Returns:
+        True if the thread appears to be a completed Q&A interaction
+
+    Example:
+        >>> msgs = [
+        ...     {"role": "user", "content": "How do I configure SSL?"},
+        ...     {"role": "assistant", "content": "Here's how..."},
+        ...     {"role": "user", "content": "Thanks, that worked!"},
+        ... ]
+        >>> is_thread_completed(msgs)
+        True
+    """
+    signals = compute_thread_heuristics(messages)
+    return signals.is_qa_like and signals.has_completion_token
+
+
+def get_thread_memory_score(messages: List[Dict]) -> float:
+    """
+    Compute a memory-worthiness score for a thread.
+
+    Higher scores indicate the thread contains valuable information
+    that should be persisted to long-term memory.
+
+    Score factors:
+    - Completed Q&A interactions (+0.3)
+    - Multi-turn conversations (+0.1 per turn, capped)
+    - Refinement/clarification patterns (+0.15)
+    - Identity statements (+0.25)
+    - Preference statements (+0.2)
+    - Correction statements (+0.3)
+    - Meta-noise penalty (-0.5)
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys
+
+    Returns:
+        Float 0.0-1.0 representing memory-worthiness
+
+    Example:
+        >>> msgs = [{"role": "user", "content": "I'm a physician in Boston"}]
+        >>> score = get_thread_memory_score(msgs)
+        >>> score > 0.5  # Identity statement should score well
+        True
+    """
+    signals = compute_thread_heuristics(messages)
+    return compute_thread_heuristic_score(signals)
+
+
+def analyze_thread(messages: List[Dict]) -> Dict:
+    """
+    Full analysis of a thread for memory-worthiness.
+
+    Returns detailed signals plus computed score, useful for debugging
+    or displaying to users why a thread is/isn't worth saving.
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys
+
+    Returns:
+        Dict with:
+            - signals: HeuristicSignals as dict
+            - score: Float 0.0-1.0
+            - is_completed: Bool
+            - recommendation: String ("save", "maybe", "skip")
+
+    Example:
+        >>> msgs = [
+        ...     {"role": "user", "content": "I prefer dark mode"},
+        ...     {"role": "assistant", "content": "Noted!"},
+        ... ]
+        >>> analysis = analyze_thread(msgs)
+        >>> analysis["signals"]["has_preference"]
+        True
+    """
+    signals = compute_thread_heuristics(messages)
+    score = compute_thread_heuristic_score(signals)
+    is_completed = signals.is_qa_like and signals.has_completion_token
+
+    # Generate recommendation
+    if score >= 0.6:
+        recommendation = "save"
+    elif score >= 0.4:
+        recommendation = "maybe"
+    else:
+        recommendation = "skip"
+
+    return {
+        "signals": signals._asdict(),
+        "score": score,
+        "is_completed": is_completed,
+        "recommendation": recommendation,
+    }

@@ -112,6 +112,24 @@ OUTCOME_VALUES = {
 }
 
 # =============================================================================
+# Time-Aware Retrieval (Phase 3)
+# =============================================================================
+# Apply time decay to retrieval scores, preferring recent memories while
+# preserving old high-signal ones (identity facts, stable preferences).
+
+TIME_DECAY_ENABLED = True  # Master switch for time-decay scoring
+
+# Half-life in days: after this many days, decay factor drops to 50%
+# 30 days means a 30-day-old memory has 50% time weight
+# 60 days means 25% time weight, etc.
+TIME_DECAY_HALF_LIFE_DAYS = 30
+
+# Alpha floor: minimum time weight for very old memories
+# At 0.3, even ancient memories retain 30% of their original score if highly relevant
+# This prevents stable identity facts from disappearing
+TIME_DECAY_ALPHA = 0.3
+
+# =============================================================================
 # Memory Consolidation
 # =============================================================================
 # Offline routine that reviews memories to create patterns and reduce redundancy.

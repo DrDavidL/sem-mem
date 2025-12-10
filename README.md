@@ -47,13 +47,17 @@ If you already run Postgres/pgvector, Qdrant, Pinecone, etc. and are happy with 
 │  L1: SmartCache (RAM)                                       │
 │  ├── Protected tier (frequently accessed)                   │
 │  └── Probation tier (recently accessed)                     │
-│ → HIT: Instant recall, no disk I/O                       │
+│ → HIT: Instant recall, no disk I/O                         │
 └─────────────────────────┬───────────────────────────────────┘
                           │ MISS
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  L2: HNSW Index (Disk)                                      │
-│ → O(log n) approximate nearest neighbor search             │
+│  L2: Hybrid Search (Disk)                                   │
+│  ├── HNSW Index: O(log n) semantic similarity              │
+│  └── Lexical Index: Token overlap for identifiers          │
+│ → Scores merged (0.7 vector + 0.3 lexical)                 │
+│ → Time decay applied (half-life scoring)                   │
+│ → Outcome utility factored in                              │
 │ → Results promoted to L1 cache                             │
 └─────────────────────────┬───────────────────────────────────┘
                           ▼
@@ -92,15 +96,19 @@ This mirrors how you probably want an assistant to behave: **fast recall for wha
 
 You still send text to OpenAI for embeddings and chat, but **the semantic index itself stays on your machine**.
 
-### 3. HNSW for Approximate Nearest Neighbor
+### 3. Hybrid Search (HNSW + Lexical)
 
 - **Why HNSW?**
   - Excellent recall/latency trade-off for typical agent-sized memory (10³–10⁶ vectors).
   - Mature, well-tested implementation (`hnswlib`).
+- **Why also lexical?**
+  - Vector search can miss exact matches for identifiers (`tbl_orders_001`, `getUserById`).
+  - Lexical fallback catches token-level matches that embedding similarity misses.
 - Tuned with:
-  - `M=16`, `ef_construction=200` by default (configurable in code).
+  - HNSW: `M=16`, `ef_construction=200` by default (configurable in code).
+  - Hybrid: `0.7 × vector + 0.3 × lexical` score merging for identifier queries.
 
-The goal isn’t to be a general-purpose vector database, but a **fast, embeddable memory index** that feels “instant” in practice.
+The goal isn't to be a general-purpose vector database, but a **fast, embeddable memory index** that feels "instant" in practice.
 
 ### 4. Memory-Aware Agent Abstractions
 
@@ -142,8 +150,12 @@ chat.remember("Patient prefers morning appointments")
 * **Zero-Latency "Hot" Recall:** Uses a Segmented LRU cache to keep relevant context in RAM.
 * **Local Storage:** Your memory index (HNSW) and instructions stay on your machine—not in a cloud database. Note: Text is still sent to OpenAI for embeddings and chat responses.
 * **HNSW Index:** Approximate nearest neighbor search with O(log n) using hnswlib.
+* **Hybrid Search:** Combines vector search with lexical search for exact identifier matching (file names, table names, etc.).
+* **Time-Decay Scoring:** Prefers recent memories while preserving old high-signal ones with configurable half-life and floor.
+* **Thread Analysis:** Heuristic-based detection of completed Q&A threads and memory-worthiness scoring.
 * **Query Expansion:** LLM-powered alternative query generation for better recall.
 * **Auto-Memory (Salience Detection):** Automatically saves important exchanges (personal facts, decisions, corrections) without explicit user action.
+* **Outcome Learning:** Tracks which memories actually help users and adjusts retrieval ranking accordingly.
 * **Web Search:** Optional web search via OpenAI's Responses API (off by default).
 * **Memory-Aware Context:** The model understands it has semantic memory and can help users manage it.
 * **Thread-Safe:** Concurrent access support with RLock synchronization.
@@ -572,13 +584,14 @@ print(f"Re-embedded {stats['re_embedded']} memories")
 .
 ├── sem_mem/
 │   ├── __init__.py          # Package exports
-│   ├── core.py              # SemanticMemory, SmartCache, MEMORY_SYSTEM_CONTEXT
+│   ├── core.py              # SemanticMemory, SmartCache, time_adjusted_score
 │   ├── async_core.py        # Async version for FastAPI
 │   ├── config.py            # Configuration and secret loading
 │   ├── vector_index.py      # HNSWIndex for L2 storage
+│   ├── lexical_index.py     # LexicalIndex for hybrid search
 │   ├── decorators.py        # @with_memory, @with_rag, MemoryChat
-│   ├── auto_memory.py       # AutoMemory salience detection
-│   ├── thread_utils.py      # Thread utilities (title generation, summarization)
+│   ├── auto_memory.py       # AutoMemory, salience detection, thread heuristics
+│   ├── thread_utils.py      # Thread utilities (title, summarization, analysis)
 │   ├── backup.py            # MemoryBackup class for backup/restore
 │   ├── thread_storage.py    # ThreadStorage for persistent threads
 │   └── api/
@@ -588,6 +601,7 @@ print(f"Re-embedded {stats['re_embedded']} memories")
 ├── local_memory/            # HNSW index files + instructions.txt
 │   ├── hnsw_index.bin       # HNSW vector index
 │   ├── hnsw_metadata.json   # Index metadata
+│   ├── lexical_index.json   # Lexical search index
 │   ├── instructions.txt     # Persistent instructions
 │   ├── threads.json         # Persisted conversation threads
 │   └── backups/             # Backup files
@@ -905,6 +919,9 @@ Sem-Mem is intentionally small and local. Some things it does **not** try to do:
 - **HNSW**: Hierarchical Navigable Small World graph for O(log n) approximate nearest neighbor search
 - **hnswlib**: Lightweight C++ library with Python bindings (ef_construction=200, M=16)
 - **Embeddings**: OpenAI `text-embedding-3-small` (1536 dimensions, configurable)
+- **Hybrid Search**: Vector + lexical index with 0.7/0.3 score merging for identifier queries
+- **Time Decay**: Exponential decay with half-life model (default 30 days) and alpha floor (default 0.3)
+- **Thread Heuristics**: Regex-based pattern detection for Q&A completion, identity, preferences, corrections
 - **Query Expansion**: Uses `gpt-4.1-mini` to generate alternative query phrasings
 - **Cache**: Segmented LRU with Protected/Probation tiers
 - **Outcome Learning**: EWMA-based utility scoring with pattern promotion
@@ -1115,38 +1132,147 @@ When contradictions are detected, they're stored in `local_memory/contradictions
 
 Review and resolve contradictions manually, then update or delete the conflicting memories.
 
+## Hybrid Search
+
+Sem-Mem combines vector search with lexical search for better retrieval, especially for exact matches like identifiers, file names, and table names.
+
+### How It Works
+
+When you call `recall()`:
+
+1. **Vector search (HNSW)** always runs for semantic similarity
+2. If the query looks like an identifier, **lexical search** also runs
+3. Results are merged: `0.7 × vector_score + 0.3 × lexical_score`
+
+### Identifier Detection
+
+Queries are classified as "identifier-like" if they contain:
+- Underscores: `tbl_orders_001`, `user_id`
+- Hyphens (3+ parts): `my-config-file`
+- Mixed letters/digits: `user123`, `v2.1.0`
+- File extensions: `.py`, `.json`, `.md`
+- CamelCase: `getUserById`, `MyComponent`
+- Very long tokens (20+ chars)
+
+```python
+from sem_mem import looks_like_identifier
+
+looks_like_identifier("tbl_orders_001")  # True
+looks_like_identifier("my-config.json")  # True
+looks_like_identifier("getUserById")     # True
+looks_like_identifier("what is X?")      # False
+```
+
+### Lexical Index
+
+The lexical index uses token overlap scoring with no external dependencies:
+- Automatically populated when memories are added
+- Persisted to `lexical_index.json` alongside HNSW files
+- Supports compound identifier tokenization (splits on `_`, `-`, camelCase)
+
+Hybrid search is automatic—no configuration needed.
+
+## Time-Decay Scoring
+
+Sem-Mem applies time decay to retrieval scores, preferring recent memories while preserving old high-signal ones (identity facts, stable preferences).
+
+### How It Works
+
+When memories are retrieved:
+
+1. Each memory's `created_at` timestamp is checked
+2. A decay factor is computed: `decay = exp(-ln(2) × age_days / half_life)`
+3. Time weight: `weight = alpha + (1 - alpha) × decay`
+4. Final score: `adjusted_score = sim_score × weight`
+
+### Decay Curve
+
+With default settings (half_life=30 days, alpha=0.3):
+
+| Age | Score Multiplier |
+|-----|------------------|
+| 0 days | 100% |
+| 7 days | 90% |
+| 30 days (half-life) | 65% |
+| 60 days | 48% |
+| 90 days | 39% |
+| 1 year | 30% (floor) |
+
+The alpha floor ensures even very old memories retain 30% of their original score if highly relevant. This prevents stable identity facts from disappearing.
+
+### Configuration
+
+```python
+# sem_mem/config.py
+TIME_DECAY_ENABLED = True           # Master switch
+TIME_DECAY_HALF_LIFE_DAYS = 30      # Days until 50% decay
+TIME_DECAY_ALPHA = 0.3              # Floor weight for old memories
+```
+
+Time decay is applied after outcome-based scoring, so both recency and proven usefulness contribute to ranking.
+
+## Thread Analysis
+
+Sem-Mem provides heuristic-based analysis to determine which threads are worth saving to long-term memory.
+
+### Thread Completion Detection
+
+Detect resolved Q&A interactions:
+
+```python
+from sem_mem import is_thread_completed, get_thread_memory_score, analyze_thread
+
+messages = [
+    {"role": "user", "content": "How do I configure SSL?"},
+    {"role": "assistant", "content": "Here's how to set up SSL..."},
+    {"role": "user", "content": "Thanks, that worked!"},
+]
+
+is_thread_completed(messages)  # True (Q&A with completion signal)
+get_thread_memory_score(messages)  # 0.6+ (high memory-worthiness)
+
+analysis = analyze_thread(messages)
+# {
+#     "signals": {"is_qa_like": True, "has_completion_token": True, ...},
+#     "score": 0.6,
+#     "is_completed": True,
+#     "recommendation": "save"
+# }
+```
+
+### Memory-Worthiness Scoring
+
+The score (0.0–1.0) is computed from cheap heuristics (no LLM calls):
+
+| Signal | Score Impact |
+|--------|-------------|
+| Completed Q&A (question + "thanks"/"got it") | +0.3 |
+| Multi-turn (3+ user messages) | +0.1 per turn (capped at +0.3) |
+| Refinement patterns ("actually", "wait", "instead") | +0.15 |
+| Identity statements ("I'm a...", "My name is...") | +0.25 |
+| Preference statements ("I prefer...", "I like...") | +0.2 |
+| Correction statements ("Actually, I meant...") | +0.3 |
+| Meta-noise ("hi", "test", "ok") | -0.5 |
+
+### Pattern Detection
+
+The heuristics detect:
+
+- **Question patterns**: `?`, "How do I...", "What is...", "Why does..."
+- **Completion tokens**: "thanks", "got it", "perfect", "that worked"
+- **Refinement**: "actually", "instead", "wait", "let me clarify"
+- **Identity**: "I'm a...", "I work as...", "My background is..."
+- **Preferences**: "I prefer...", "I always...", "I'd rather..."
+- **Corrections**: "Actually, I meant...", "No, it should be..."
+
 ## Future Directions
 
-Sem-Mem now supports outcome-based learning (see above). Here are additional ideas from related projects worth exploring.
+Sem-Mem now supports outcome-based learning, hybrid search, time-decay scoring, and thread analysis heuristics. Here are additional ideas worth exploring:
 
-### Hybrid Search
-
-Roampal and similar systems combine multiple retrieval strategies:
-
-| Strategy | Strength | Weakness |
-|----------|----------|----------|
-| **Vector/semantic** | Finds conceptually related content | Misses exact matches, keyword-heavy queries |
-| **BM25/lexical** | Exact keyword matching | No semantic understanding |
-| **Cross-encoder reranking** | High precision | Slower, requires candidate set |
-
-Sem-Mem currently uses pure vector search. Adding BM25 as a fallback or hybrid scorer could improve retrieval for keyword-heavy queries.
-
-### Tiered Memory Retention
-
-Roampal's 5-tier model with automatic retention policies is interesting:
-
-| Tier | Retention | Promotion Criteria |
-|------|-----------|-------------------|
-| Working | 24 hours | Current context |
-| History | 30 days | Recent interactions |
-| Patterns | Permanent | Score ≥0.9, 3+ successful uses |
-| Memory Bank | Permanent | User identity/preferences |
-| Books | Permanent | Reference documents |
-
-Sem-Mem's L1/L2 model is simpler (cache vs. permanent storage), but could benefit from:
-- **Time-based decay** for less-accessed memories
-- **Automatic archival** of low-value content
-- **Explicit "pattern" tier** for proven-useful memories
+- **Cross-encoder reranking**: Use a cross-encoder model to rerank candidates for higher precision
+- **Knowledge graph integration**: Extract entities and relationships for structured reasoning
+- **Automatic archival**: Auto-demote very old low-utility memories to cold storage
+- **Thread normalization**: Summarize/normalize threads before L2 storage for cleaner retrieval
 
 ### Related Projects
 

@@ -28,13 +28,29 @@ from .config import get_api_key, get_config, get_provider_api_key, get_provider_
 from .vector_index import HNSWIndex, migrate_lsh_to_hnsw
 from .thread_storage import ThreadStorage
 from .backup import MemoryBackup
-from .auto_memory import AutoMemory, AsyncAutoMemory, MemorySignal, compute_quick_salience
+from .auto_memory import (
+    AutoMemory,
+    AsyncAutoMemory,
+    MemorySignal,
+    HeuristicSignals,
+    compute_quick_salience,
+    compute_thread_heuristics,
+    compute_thread_heuristic_score,
+)
 from .thread_utils import (
     generate_thread_title,
     estimate_message_tokens,
     select_summary_window,
     summarize_conversation_window,
     summarize_deleted_thread,
+    is_thread_completed,
+    get_thread_memory_score,
+    analyze_thread,
+)
+from .lexical_index import (
+    LexicalIndex,
+    looks_like_identifier,
+    merge_search_results,
 )
 from .exceptions import (
     SemMemError,
@@ -93,13 +109,23 @@ __all__ = [
     "AutoMemory",
     "AsyncAutoMemory",
     "MemorySignal",
+    "HeuristicSignals",
     "compute_quick_salience",
+    "compute_thread_heuristics",
+    "compute_thread_heuristic_score",
     # Thread utils
     "generate_thread_title",
     "estimate_message_tokens",
     "select_summary_window",
     "summarize_conversation_window",
     "summarize_deleted_thread",
+    "is_thread_completed",
+    "get_thread_memory_score",
+    "analyze_thread",
+    # Lexical index (hybrid search)
+    "LexicalIndex",
+    "looks_like_identifier",
+    "merge_search_results",
     # Exceptions
     "SemMemError",
     "EmbeddingMismatchError",

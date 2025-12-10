@@ -1,6 +1,7 @@
 import os
 import threading
 from datetime import datetime
+from math import exp, log
 import numpy as np
 from collections import OrderedDict
 from pypdf import PdfReader
@@ -19,10 +20,15 @@ from .config import (
     PATTERN_MIN_SUCCESSES,
     PATTERN_MIN_UTILITY,
     OUTCOME_VALUES,
+    # Time-aware retrieval
+    TIME_DECAY_ENABLED,
+    TIME_DECAY_HALF_LIFE_DAYS,
+    TIME_DECAY_ALPHA,
 )
 from .vector_index import HNSWIndex
 from .thread_storage import ThreadStorage
 from .backup import MemoryBackup
+from .lexical_index import LexicalIndex, looks_like_identifier, merge_search_results
 from .providers import (
     get_chat_provider,
     get_embedding_provider,
@@ -32,6 +38,74 @@ from .providers import (
 
 if TYPE_CHECKING:
     from openai import OpenAI
+
+
+# =============================================================================
+# Time-Aware Scoring (Phase 3)
+# =============================================================================
+
+def time_adjusted_score(
+    sim_score: float,
+    timestamp: Optional[str],
+    half_life_days: float = TIME_DECAY_HALF_LIFE_DAYS,
+    alpha: float = TIME_DECAY_ALPHA,
+) -> float:
+    """
+    Apply time decay to a similarity score.
+
+    Uses exponential decay with a half-life model:
+    - After half_life_days, the time weight drops to 50%
+    - After 2*half_life_days, the time weight drops to 25%
+    - The alpha floor ensures old memories don't disappear completely
+
+    Formula: sim_score * (alpha + (1 - alpha) * decay_factor)
+    Where: decay_factor = exp(-decay_rate * age_days)
+           decay_rate = ln(2) / half_life_days
+
+    Args:
+        sim_score: Raw similarity score (typically 0-1)
+        timestamp: ISO format timestamp string (e.g., "2024-01-15T10:30:00")
+        half_life_days: Days until decay reaches 50%
+        alpha: Floor weight (0-1). Old memories retain at least alpha * sim_score
+
+    Returns:
+        Time-adjusted score. For recent memories, close to sim_score.
+        For old memories, approaches alpha * sim_score.
+
+    Examples:
+        >>> # Fresh memory (today) - no decay
+        >>> time_adjusted_score(0.8, datetime.now().isoformat())  # ≈ 0.8
+
+        >>> # 30-day-old memory with default half_life=30
+        >>> time_adjusted_score(0.8, "...")  # ≈ 0.8 * (0.3 + 0.7 * 0.5) = 0.52
+
+        >>> # Very old memory - approaches floor
+        >>> time_adjusted_score(0.8, "2020-01-01T00:00:00")  # ≈ 0.8 * 0.3 = 0.24
+    """
+    if not timestamp:
+        # No timestamp - don't apply decay
+        return sim_score
+
+    try:
+        created_at = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        age_days = (datetime.now() - created_at.replace(tzinfo=None)).days
+    except (ValueError, TypeError):
+        # Invalid timestamp - don't apply decay
+        return sim_score
+
+    if age_days <= 0:
+        # Future or same-day memory - no decay
+        return sim_score
+
+    # Exponential decay: half-life model
+    decay_rate = log(2) / half_life_days
+    decay_factor = exp(-decay_rate * age_days)
+
+    # Apply floor: alpha + (1 - alpha) * decay
+    time_weight = alpha + (1 - alpha) * decay_factor
+
+    return sim_score * time_weight
+
 
 # Template for system context (use get_memory_system_context() to get with current time)
 _MEMORY_SYSTEM_CONTEXT_TEMPLATE = """Current date and time: {datetime}
@@ -329,6 +403,11 @@ class SemanticMemory:
             embedding_model=self.embedding_model,
         )
 
+        # Lexical index for hybrid search (Phase 2 enhancement)
+        self._lexical_index_path = os.path.join(storage_dir, "lexical_index.json")
+        self.lexical_index = LexicalIndex()
+        self._load_lexical_index()
+
         # Auto-memory evaluator (lazy init to avoid import if disabled)
         self._auto_memory = None
 
@@ -376,6 +455,31 @@ class SemanticMemory:
         """Check if model is a reasoning model."""
         model = model or self.chat_model
         return self._chat_provider.is_reasoning_model(model)
+
+    def _load_lexical_index(self) -> None:
+        """Load lexical index from disk, rebuilding if needed."""
+        if self.lexical_index.load(self._lexical_index_path):
+            return  # Loaded successfully
+
+        # If no lexical index exists, rebuild from HNSW entries
+        self._rebuild_lexical_index()
+
+    def _rebuild_lexical_index(self) -> None:
+        """Rebuild lexical index from all HNSW entries."""
+        self.lexical_index.clear()
+        for entry in self.vector_index.get_all_entries():
+            text = entry.get("text", "")
+            if text:
+                # Look up the ID for this text
+                result = self.vector_index.get_entry_by_text(text)
+                if result:
+                    memory_id, _ = result
+                    self.lexical_index.add(str(memory_id), text)
+        self.lexical_index.save(self._lexical_index_path)
+
+    def _save_lexical_index(self) -> None:
+        """Save lexical index to disk."""
+        self.lexical_index.save(self._lexical_index_path)
 
     def _expand_query(self, query: str) -> List[str]:
         """
@@ -471,6 +575,9 @@ class SemanticMemory:
 
         if is_new:
             self.vector_index.save()
+            # Also add to lexical index for hybrid search
+            self.lexical_index.add(str(entry_id), text)
+            self._save_lexical_index()
             msg = f"Stored in HNSW index (id={entry_id})"
         else:
             msg = "Memory already exists."
@@ -510,6 +617,9 @@ class SemanticMemory:
 
         if is_new:
             self.vector_index.save()
+            # Also add to lexical index for hybrid search
+            self.lexical_index.add(str(memory_id), text)
+            self._save_lexical_index()
 
         return memory_id, is_new
 
@@ -621,7 +731,7 @@ class SemanticMemory:
                 raw_memories = [x[1]['text'] for x in l1_hits[:limit]]
                 return self._format_memories_for_display(raw_memories), logs
 
-        # --- TIER 2: Search HNSW Index ---
+        # --- TIER 2: Search HNSW Index (with optional lexical hybrid) ---
         logs.append("🔍 L1 Miss... Searching HNSW index...")
 
         # Search HNSW with all query variants - returns (score, memory_id, entry) tuples
@@ -630,6 +740,42 @@ class SemanticMemory:
             k=limit * 2,  # Get extra candidates for filtering
             threshold=threshold,
         )
+
+        # Check if query looks like an identifier (file names, table names, etc.)
+        # If so, also try lexical search and merge results
+        if looks_like_identifier(query) and len(self.lexical_index) > 0:
+            logs.append("🔤 Query looks like identifier, adding lexical search...")
+            lexical_results = self.lexical_index.search(query, k=limit * 2)
+
+            if lexical_results:
+                # Convert lexical results to same format as vector results
+                # lexical_results: [(doc_id, score), ...]
+                lexical_entries = []
+                for doc_id, lex_score in lexical_results:
+                    entry = self.vector_index.get_entry(int(doc_id))
+                    if entry:
+                        lexical_entries.append((lex_score, int(doc_id), entry))
+
+                if lexical_entries:
+                    # Merge vector and lexical results
+                    # Convert to dict for merging: {memory_id: (score, entry)}
+                    vector_dict = {mem_id: (score, entry) for score, mem_id, entry in results}
+                    lexical_dict = {mem_id: (score, entry) for score, mem_id, entry in lexical_entries}
+
+                    # Combine scores with alpha=0.7 for vector, 0.3 for lexical
+                    all_ids = set(vector_dict.keys()) | set(lexical_dict.keys())
+                    merged = []
+                    for mem_id in all_ids:
+                        v_score, v_entry = vector_dict.get(mem_id, (0.0, None))
+                        l_score, l_entry = lexical_dict.get(mem_id, (0.0, None))
+                        entry = v_entry or l_entry
+                        combined_score = 0.7 * v_score + 0.3 * l_score
+                        if combined_score >= threshold:
+                            merged.append((combined_score, mem_id, entry))
+
+                    merged.sort(key=lambda x: x[0], reverse=True)
+                    results = merged
+                    logs.append(f"🔀 Merged {len(vector_dict)} vector + {len(lexical_dict)} lexical results")
 
         if not results:
             if include_metadata:
@@ -650,6 +796,18 @@ class SemanticMemory:
         else:
             # No adjustment - keep original scores
             adjusted = [(sim_score, sim_score, memory_id, entry) for sim_score, memory_id, entry in results]
+
+        # Apply time-decay scoring (Phase 3)
+        if TIME_DECAY_ENABLED:
+            time_adjusted = []
+            for final_score, sim_score, memory_id, entry in adjusted:
+                timestamp = entry.get("created_at")
+                # Apply time decay to the final score
+                decayed_score = time_adjusted_score(final_score, timestamp)
+                time_adjusted.append((decayed_score, sim_score, memory_id, entry))
+            time_adjusted.sort(key=lambda x: x[0], reverse=True)
+            adjusted = time_adjusted
+            logs.append("⏱️ Applied time-decay scoring")
 
         # Limit results
         top_results = adjusted[:limit]
