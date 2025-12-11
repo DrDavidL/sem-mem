@@ -94,14 +94,21 @@ PREFERENCE_PATTERNS = [
 IDENTITY_PATTERNS = [
     r"\bi'?m\s+(a|an)\s+\w+",  # "I'm a physician", "I'm an engineer"
     r"\bi\s+am\s+(a|an)\s+\w+",
-    r"\bi\s+work\s+(as|in|at|for)\b",
-    r"\bmy\s+(job|role|title|position)\s+(is|as)\b",
+    r"\bi'?m\s+\d+",  # "I'm 6 feet tall", "I'm 35 years old"
+    r"\bi\s+am\s+\d+",  # "I am 6 feet tall"
+    r"\bi\s+work(ed)?\s+(as|in|at|for)\b",  # Present and past tense
+    r"\bmy\s+(job|role|title|position)\s+(is|was|as)\b",
     r"\bi'?ve\s+been\s+(a|an|working)\b",
-    r"\bi\s+specialize\s+in\b",
+    r"\bi\s+specialize(d)?\s+in\b",
     r"\bmy\s+background\s+is\b",
     r"\bi\s+have\s+\d+\s+(years?|kids?|children)\b",
     r"\bi'?m\s+married\b",
-    r"\bi\s+live\s+(in|with)\b",
+    r"\bi\s+live(d)?\s+(in|at|with)\b",  # Present and past tense, added "at"
+    r"\bi\s+(went|go)\s+to\b",  # "I went to MIT", "I go to Stanford"
+    r"\bi\s+(was|am)\s+(in|at|with)\b",  # "I was in AEPi", "I am at Google"
+    r"\bi\s+grew\s+up\s+(in|on|at)\b",  # "I grew up in Texas"
+    r"\bi\s+(studied|study)\s+(at|in)?\b",  # "I studied at Harvard"
+    r"\bi\s+(graduated|graduate)\s+from\b",  # "I graduated from college"
 ]
 
 # Patterns for corrections/updates (override older facts)
@@ -470,13 +477,16 @@ def compute_quick_salience(user_msg: str, assistant_msg: str) -> Tuple[float, st
         score += 0.1
 
     # Personal pronouns in statements (not questions) suggest self-disclosure
-    if re.search(r"\bi\s+(am|was|have|had|work|live|prefer|like|need)\b", user_msg.lower()):
+    # Includes contractions (I'm, I've) and past tense verbs
+    if re.search(r"\bi('?m|'?ve|\s+(am|was|were|have|had|work|worked|live|lived|prefer|like|need|went|grew|studied|graduated))\b", user_msg.lower()):
         if not user_msg.strip().endswith('?'):
             score += 0.2
 
     # Very short exchanges are usually not worth remembering
+    # But don't penalize if it's already identified as identity/preference/correction
     if len(user_msg) < 20 and len(assistant_msg) < 50:
-        score *= 0.5
+        if memory_kind == MEMORY_KIND_FACT:  # Only penalize generic facts
+            score *= 0.5
 
     # Questions without answers are not worth remembering
     if user_msg.strip().endswith('?') and len(assistant_msg) < 100:
@@ -595,7 +605,8 @@ class AutoMemory:
     def _extract_fact_heuristic(self, user_msg: str, assistant_msg: str) -> str:
         """Extract a fact using simple heuristics."""
         # If user is stating something about themselves, use that
-        if re.search(r"^i\s+(am|'m|was|have|had|work|live|prefer|like|need|want)\b", user_msg.lower()):
+        # Matches contractions and past tense verbs for personal statements
+        if re.search(r"^i('?m|'?ve|\s+(am|was|were|have|had|work|worked|live|lived|prefer|like|need|want|went|grew|studied|graduated))\b", user_msg.lower()):
             # Clean up and return user's statement
             return user_msg.strip()
 
@@ -698,7 +709,8 @@ class AsyncAutoMemory:
 
     def _extract_fact_heuristic(self, user_msg: str, assistant_msg: str) -> str:
         """Extract a fact using simple heuristics."""
-        if re.search(r"^i\s+(am|'m|was|have|had|work|live|prefer|like|need|want)\b", user_msg.lower()):
+        # Matches contractions and past tense verbs for personal statements
+        if re.search(r"^i('?m|'?ve|\s+(am|was|were|have|had|work|worked|live|lived|prefer|like|need|want|went|grew|studied|graduated))\b", user_msg.lower()):
             return user_msg.strip()
 
         if len(assistant_msg) > 200:

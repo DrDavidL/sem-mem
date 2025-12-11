@@ -26,6 +26,7 @@ from .config import (
 )
 from .vector_index import HNSWIndex
 from .providers import get_chat_provider
+from .web_search import WebSearchManager, format_search_results_for_context
 
 
 class AsyncSemanticMemory:
@@ -67,6 +68,9 @@ class AsyncSemanticMemory:
         self.include_memory_context = include_memory_context
         self.include_file_access = include_file_access
         self.web_search_enabled = web_search
+
+        # Web search manager (auto-detects Google PSE or falls back to OpenAI)
+        self._web_search = WebSearchManager()
 
         # Initialize sync chat provider for consolidator and other sync operations
         self._chat_provider = get_chat_provider(
@@ -114,6 +118,21 @@ class AsyncSemanticMemory:
                 salience_threshold=self.auto_memory_threshold,
             )
         return self._auto_memory
+
+    @property
+    def is_exa_available(self) -> bool:
+        """Check if Exa is configured for web search."""
+        return self._web_search.is_exa_available()
+
+    @property
+    def is_google_pse_available(self) -> bool:
+        """Check if Google PSE is configured for web search."""
+        return self._web_search.is_google_pse_available()
+
+    @property
+    def web_search_backend(self) -> str:
+        """Get the active web search backend name."""
+        return self._web_search.get_available_backend()
 
     async def load_instructions(self) -> str:
         """Load user instructions from file.
@@ -545,10 +564,27 @@ class AsyncSemanticMemory:
         if previous_response_id:
             create_params["previous_response_id"] = previous_response_id
 
-        # Add web search tool if enabled
+        # Web search: use best available backend (Exa > Google PSE > OpenAI)
         if use_web_search:
-            create_params["tools"] = [{"type": "web_search_preview"}]
-            logs.append("🌐 Web search enabled")
+            backend = self._web_search.get_available_backend()
+            if backend in ("exa", "google_pse"):
+                # Use Exa or Google PSE (inject results as context)
+                try:
+                    search_response = self._web_search.search(user_query, num_results=5)
+                    if search_response and search_response.results:
+                        web_context = format_search_results_for_context(search_response)
+                        create_params["input"] = f"{web_context}\n\n{input_text}"
+                        backend_name = "Exa" if search_response.backend == "exa" else "Google PSE"
+                        logs.append(f"🔍 {backend_name}: {len(search_response.results)} results")
+                except Exception as e:
+                    logs.append(f"⚠️ {backend} error: {e}")
+                    # Fall back to OpenAI web search
+                    create_params["tools"] = [{"type": "web_search_preview"}]
+                    logs.append("🌐 Fallback to OpenAI web search")
+            else:
+                # Use OpenAI's web_search_preview tool
+                create_params["tools"] = [{"type": "web_search_preview"}]
+                logs.append("🌐 OpenAI web search enabled")
 
         # Reasoning models (gpt-5.1, o1, o3) require special handling
         if use_model in ("gpt-5.1", "o1", "o3"):

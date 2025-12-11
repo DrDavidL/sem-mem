@@ -4,6 +4,18 @@ FastAPI server for Sem-Mem semantic memory system.
 Run with: uvicorn server:app --reload
 """
 
+from pathlib import Path
+
+# Load .env file BEFORE any other imports that might need env vars
+try:
+    from dotenv import load_dotenv
+    for env_path in [Path(__file__).parent / ".env", Path(".env")]:
+        if env_path.exists():
+            load_dotenv(env_path)
+            break
+except ImportError:
+    pass  # python-dotenv not installed
+
 from contextlib import asynccontextmanager
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Query

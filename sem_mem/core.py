@@ -35,6 +35,7 @@ from .providers import (
     BaseChatProvider,
     BaseEmbeddingProvider,
 )
+from .web_search import WebSearchManager, format_search_results_for_context
 
 if TYPE_CHECKING:
     from openai import OpenAI
@@ -392,6 +393,9 @@ class SemanticMemory:
         self.include_file_access = include_file_access
         self.web_search_enabled = web_search
 
+        # Web search manager (auto-detects Google PSE or falls back to OpenAI)
+        self._web_search = WebSearchManager()
+
         # Segmented LRU cache for hot items (L1)
         self.local_cache = SmartCache(capacity=cache_size)
 
@@ -455,6 +459,21 @@ class SemanticMemory:
         """Check if model is a reasoning model."""
         model = model or self.chat_model
         return self._chat_provider.is_reasoning_model(model)
+
+    @property
+    def is_exa_available(self) -> bool:
+        """Check if Exa is configured for web search."""
+        return self._web_search.is_exa_available()
+
+    @property
+    def is_google_pse_available(self) -> bool:
+        """Check if Google PSE is configured for web search."""
+        return self._web_search.is_google_pse_available()
+
+    @property
+    def web_search_backend(self) -> Optional[str]:
+        """Get the active web search backend name."""
+        return self._web_search.get_available_backend()
 
     def _load_lexical_index(self) -> None:
         """Load lexical index from disk, rebuilding if needed."""
@@ -1110,10 +1129,27 @@ class SemanticMemory:
         # Build provider-specific kwargs
         kwargs: Dict = {}
 
-        # Add web search tool if enabled (OpenAI-specific)
+        # Web search: use best available backend (Exa > Google PSE > OpenAI)
+        web_search_context = ""
         if use_web_search:
-            kwargs["tools"] = [{"type": "web_search_preview"}]
-            logs.append("🌐 Web search enabled")
+            backend = self._web_search.get_available_backend()
+            if backend in ("exa", "google_pse"):
+                # Use Exa or Google PSE (inject results as context)
+                try:
+                    search_response = self._web_search.search(user_query, num_results=5)
+                    if search_response and search_response.results:
+                        web_search_context = format_search_results_for_context(search_response)
+                        backend_name = "Exa" if search_response.backend == "exa" else "Google PSE"
+                        logs.append(f"🔍 {backend_name}: {len(search_response.results)} results")
+                except Exception as e:
+                    logs.append(f"⚠️ {backend} error: {e}")
+                    # Fall back to OpenAI web search
+                    kwargs["tools"] = [{"type": "web_search_preview"}]
+                    logs.append("🌐 Fallback to OpenAI web search")
+            else:
+                # Use OpenAI's web_search_preview tool
+                kwargs["tools"] = [{"type": "web_search_preview"}]
+                logs.append("🌐 OpenAI web search enabled")
 
         # Reasoning models require special handling
         if self._is_reasoning_model(use_model):
@@ -1121,6 +1157,10 @@ class SemanticMemory:
             # Don't set temperature for reasoning models
         else:
             kwargs["temperature"] = 0.7
+
+        # Inject web search results into context (for Google PSE)
+        if web_search_context:
+            input_text = f"{web_search_context}\n\n{input_text}"
 
         # For Responses API, we pass input_text as messages with one user message
         # The provider will handle Responses API vs Chat Completions based on previous_response_id

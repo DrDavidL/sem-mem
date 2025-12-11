@@ -1,5 +1,19 @@
 import json
+import os
 from datetime import datetime
+from pathlib import Path
+
+# Load .env file BEFORE any other imports that might need env vars
+# This ensures Streamlit doesn't need secrets.toml if .env exists
+try:
+    from dotenv import load_dotenv
+    # Try project root first, then current directory
+    for env_path in [Path(__file__).parent / ".env", Path(".env")]:
+        if env_path.exists():
+            load_dotenv(env_path)
+            break
+except ImportError:
+    pass  # python-dotenv not installed, rely on actual env vars
 
 import streamlit as st
 import pandas as pd
@@ -482,10 +496,20 @@ with st.sidebar:
             agent.reasoning_effort = selected_effort
 
     # Web Search Toggle
+    web_backend = agent.web_search_backend
+    if agent.is_exa_available:
+        backend_label = "Exa"
+        backend_help = "Using Exa AI-native search for real-time data."
+    elif agent.is_google_pse_available:
+        backend_label = "Google PSE"
+        backend_help = "Using Google Programmable Search Engine."
+    else:
+        backend_label = "OpenAI"
+        backend_help = "Set EXA_API_KEY or GOOGLE_PSE_API_KEY in .env for better search."
     web_search_enabled = st.toggle(
-        "🌐 Web Search",
+        f"🌐 Web Search ({backend_label})",
         value=st.session_state.get("web_search", False),
-        help="Enable web search for real-time information"
+        help=backend_help
     )
     if web_search_enabled != st.session_state.get("web_search", False):
         st.session_state.web_search = web_search_enabled

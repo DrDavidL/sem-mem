@@ -52,6 +52,14 @@ from .lexical_index import (
     looks_like_identifier,
     merge_search_results,
 )
+from .web_search import (
+    WebSearchManager,
+    GooglePSESearch,
+    ExaSearch,
+    SearchResult,
+    SearchResponse,
+    format_search_results_for_context,
+)
 from .exceptions import (
     SemMemError,
     EmbeddingMismatchError,
@@ -126,6 +134,13 @@ __all__ = [
     "LexicalIndex",
     "looks_like_identifier",
     "merge_search_results",
+    # Web search
+    "WebSearchManager",
+    "GooglePSESearch",
+    "ExaSearch",
+    "SearchResult",
+    "SearchResponse",
+    "format_search_results_for_context",
     # Exceptions
     "SemMemError",
     "EmbeddingMismatchError",
