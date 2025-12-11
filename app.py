@@ -92,6 +92,7 @@ if "reasoning_effort" not in st.session_state:
 #       "title": "New conversation", # Display title (auto-generated or user-set)
 #       "title_user_overridden": False,  # If True, auto-rename won't touch it
 #       "summary_windows": [],       # List of summary window dicts (see below)
+#       "instructions": None,        # Thread-specific instructions (None = use global)
 #   }
 #
 # Summary window structure:
@@ -112,6 +113,7 @@ def _create_empty_thread() -> dict:
         "title": "New conversation",
         "title_user_overridden": False,
         "summary_windows": [],
+        "instructions": None,  # None = use global instructions
     }
 
 
@@ -417,6 +419,44 @@ with st.sidebar:
                 st.success("Title saved!")
                 st.rerun()
 
+    # Thread-specific instructions UI
+    with st.expander("Thread personality", expanded=False):
+        thread_instructions = current_thread_data.get("instructions")
+        use_thread_instructions = st.checkbox(
+            "Use custom instructions for this thread",
+            value=thread_instructions is not None,
+            key="use_thread_instructions",
+            help="Override global instructions with thread-specific personality"
+        )
+
+        if use_thread_instructions:
+            # Show/edit thread-specific instructions
+            global_instructions = agent.load_instructions() or ""
+            default_value = thread_instructions if thread_instructions is not None else global_instructions
+            new_thread_instructions = st.text_area(
+                "Thread instructions",
+                value=default_value,
+                height=100,
+                key="thread_instructions_input",
+                label_visibility="collapsed",
+                placeholder="Enter custom instructions for this thread..."
+            )
+            if st.button("Save thread instructions", key="save_thread_instructions"):
+                current_thread_data["instructions"] = new_thread_instructions
+                _persist_threads_if_changed()
+                st.success("Thread instructions saved!")
+                st.rerun()
+        else:
+            # Clear thread-specific instructions (use global)
+            if thread_instructions is not None:
+                if st.button("Clear thread instructions", key="clear_thread_instructions"):
+                    current_thread_data["instructions"] = None
+                    _persist_threads_if_changed()
+                    st.success("Now using global instructions")
+                    st.rerun()
+            else:
+                st.caption("Using global instructions")
+
     # Thread delete UI
     with st.expander("🗑️ Delete thread", expanded=False):
         has_messages = len(current_thread_data.get("messages", [])) >= 2
@@ -697,8 +737,12 @@ with tab1:
         # 3. Chat with RAG
         else:
             prev_id = thread_data["response_id"]
+            # Use thread-specific instructions if set, otherwise use global
+            thread_instructions = thread_data.get("instructions")
             response_text, new_response_id, retrieved_mems, logs = agent.chat_with_memory(
-                prompt, previous_response_id=prev_id
+                prompt,
+                previous_response_id=prev_id,
+                instructions=thread_instructions,
             )
             thread_data["response_id"] = new_response_id
 

@@ -20,7 +20,8 @@ Tiered semantic memory system for AI agents using HNSW-based vector indexing.
 
 | Memory Type | Storage | Scope | Eviction | User Update | Auto Update |
 |-------------|---------|-------|----------|-------------|-------------|
-| **Instructions** | `instructions.txt` | All threads | Never | Sidebar editor, `instruct:` cmd, file edit | Never |
+| **Global Instructions** | `instructions.txt` | All threads | Never | Sidebar editor, `instruct:` cmd, file edit | Never |
+| **Thread Instructions** | Thread data | Per thread | With thread | Thread personality expander | Never |
 | **L1 (Hot Cache)** | RAM (SmartCache) | All threads | LRU | None (automatic only) | Promoted from L2 on access; auto-saved to L2 after 6+ hits |
 | **L2 (Cold Storage)** | HNSW index | All threads | Never | `remember:` cmd, PDF upload, Save Thread button | Auto-saved from L1 after 6+ hits; **Auto-memory** saves salient exchanges |
 | **Thread History** | Session state | Per thread | New thread | None | Automatic on chat |
@@ -53,10 +54,17 @@ response = memory.chat_with_memory(query, auto_remember=False)
 
 ### How Each Memory Is Used
 
-**Instructions** (`local_memory/instructions.txt`)
-- Loaded on every API call via `instructions` parameter
+**Global Instructions** (`local_memory/instructions.txt`)
+- Loaded on every API call via `instructions` parameter (unless thread has custom instructions)
 - **User update**: Sidebar text editor, `instruct:` command, or direct file edit
 - Example: "I am an informatics physician specializing in clinical decision support."
+
+**Thread Instructions** (stored in thread data)
+- Optional per-thread override of global instructions
+- Enables different "personalities" or contexts for different threads
+- **User update**: Thread personality expander in sidebar
+- Falls back to global instructions if not set
+- Example: One thread for coding assistance, another for creative writing
 
 **L1 SmartCache** (Segmented LRU)
 - Checked first on every query (fast, in-memory)
@@ -210,9 +218,37 @@ return response.output_text, response.id
 - Server-side conversation state management
 
 ### Thread State
-Each thread stores `response_id` to chain conversations:
+Each thread stores `response_id` to chain conversations, and optionally custom instructions:
 ```python
 st.session_state.threads = {
-    "Thread 1": {"messages": [], "response_id": None}
+    "Thread 1": {
+        "messages": [],
+        "response_id": None,
+        "title": "New conversation",
+        "title_user_overridden": False,
+        "summary_windows": [],
+        "instructions": None,  # None = use global, string = custom instructions
+    }
 }
 ```
+
+### Thread-Specific Instructions (Personalities)
+You can give each thread a different personality by setting custom instructions:
+
+```python
+# Via API
+response, resp_id, mems, logs = memory.chat_with_memory(
+    "Hello!",
+    previous_response_id=prev_id,
+    instructions="You are a pirate. Respond in pirate speak.",  # Override global
+)
+
+# Via Streamlit UI
+# Use the "Thread personality" expander in the sidebar
+```
+
+**Use cases:**
+- Different assistants: coding helper vs creative writer vs research assistant
+- Role-playing: historical figures, fictional characters
+- Specialized contexts: medical terminology vs layman explanations
+- Language/tone: formal vs casual, verbose vs concise

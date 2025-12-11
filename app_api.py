@@ -92,6 +92,7 @@ if not check_health():
 #       "response_id": None,         # OpenAI Responses API ID for continuity
 #       "title": "New conversation", # Display title (auto-generated or user-set)
 #       "title_user_overridden": False,  # If True, auto-rename won't touch it
+#       "instructions": None,        # Thread-specific instructions (None = use global)
 #   }
 
 def _create_empty_thread() -> dict:
@@ -101,6 +102,7 @@ def _create_empty_thread() -> dict:
         "response_id": None,
         "title": "New conversation",
         "title_user_overridden": False,
+        "instructions": None,  # None = use global instructions
     }
 
 

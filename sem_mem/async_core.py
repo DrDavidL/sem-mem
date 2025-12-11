@@ -518,6 +518,7 @@ class AsyncSemanticMemory:
         reasoning_effort: Optional[str] = None,
         auto_remember: Optional[bool] = None,
         web_search: Optional[bool] = None,
+        instructions: Optional[str] = None,
     ) -> Tuple[str, str, List[str], List[str]]:
         """
         Chat with RAG using Responses API.
@@ -529,6 +530,7 @@ class AsyncSemanticMemory:
             reasoning_effort: For reasoning models: "low", "medium", "high"
             auto_remember: Override auto-memory setting for this call
             web_search: Override web search setting for this call
+            instructions: Override instructions (None = use global instructions.txt)
 
         Returns:
             Tuple of (response_text, response_id, memories, logs)
@@ -536,12 +538,13 @@ class AsyncSemanticMemory:
         memories, logs = await self.recall(user_query)
 
         # Build instructions: memory context (with current timestamp) + user instructions
-        user_instructions = await self.load_instructions() or "You are a helpful assistant."
+        # Use provided instructions, or fall back to global instructions.txt
+        user_instructions = instructions if instructions is not None else (await self.load_instructions() or "You are a helpful assistant.")
         if self.include_memory_context:
             system_context = get_memory_system_context(include_files=self.include_file_access)
-            instructions = f"{system_context}\n\n{user_instructions}"
+            full_instructions = f"{system_context}\n\n{user_instructions}"
         else:
-            instructions = user_instructions
+            full_instructions = user_instructions
 
         if memories:
             context_block = "\n".join([f"- {m}" for m in memories])
@@ -557,7 +560,7 @@ class AsyncSemanticMemory:
         # Build base parameters
         create_params: Dict = {
             "model": use_model,
-            "instructions": instructions,
+            "instructions": full_instructions,
             "input": input_text,
         }
 
