@@ -271,7 +271,7 @@ response = chat.send("Hello, I'm a physician.")
 response = chat.send("What's my profession?")  # Remembers context
 
 # Memory operations
-chat.remember("Patient prefers morning appointments")
+chat.remember("Spouse prefers early AM flights.")
 chat.add_instruction("Always be concise")
 chat.save_thread()  # Save conversation to L2
 
