@@ -136,13 +136,15 @@ print(chat.send("Where do I live and what do I do?"))
 # → Model can answer from semantic memory, not just the last message
 
 # Explicit memory storage
-chat.remember("Patient prefers morning appointments")
+chat.remember("Spouse prefers early AM flights")
 ```
 
 ### Medical Education Example
 
 ```python
-# Store teaching case facts - (Not for clinical care - validation/security checks needed!)
+# Store teaching case facts for board review
+chat.remember("Wernicke encephalopathy triad: confusion, ataxia, ophthalmoplegia")
+chat.remember("MEN1 = pituitary, parathyroid, pancreas (3 Ps)")
 ```
 
 ## Features
@@ -160,7 +162,7 @@ chat.remember("Patient prefers morning appointments")
 * **Memory-Aware Context:** The model understands it has semantic memory and can help users manage it.
 * **Thread-Safe:** Concurrent access support with RLock synchronization.
 * **Model Selection:** Support for reasoning models (gpt-5.1, o1, o3) with configurable reasoning effort.
-* **PDF Ingestion:** "Read" clinical guidelines or papers and auto-chunk them into long-term memory.
+* **PDF Ingestion:** "Read" medical education materials or papers and auto-chunk them into long-term memory.
 * **Memory Atlas:** A 2D visualization (PCA) of your knowledge graph to verify semantic clustering.
 * **FastAPI Server:** RESTful API for programmatic access and microservice deployment.
 * **Docker Support:** Containerized deployment with docker-compose.
@@ -406,12 +408,12 @@ memory = SemanticMemory(
 )
 
 # Store facts
-memory.remember("The patient is allergic to penicillin")
-memory.add_instruction("I am an informatics physician")
+memory.remember("Beta blockers are contraindicated in decompensated heart failure")
+memory.add_instruction("I am studying for my cardiology boards")
 
 # Query with RAG
 response, resp_id, mems, logs = memory.chat_with_memory(
-    "What allergies should I check?",
+    "When should I avoid beta blockers?",
     previous_response_id=prev_id,  # For conversation continuity
     web_search=True,               # Enable web search for this query
 )
