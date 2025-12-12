@@ -414,17 +414,43 @@ with st.sidebar:
                 api_request("PUT", f"/model?model={selected_model}&reasoning_effort={selected_effort}")
                 st.rerun()
 
-    # Web Search Toggle
+    # Tools Section
+    st.header("🔧 Tools")
+
+    # Initialize tool states
     if "web_search" not in st.session_state:
         st.session_state.web_search = False
+    if "web_fetch" not in st.session_state:
+        st.session_state.web_fetch = False
+    if "file_access" not in st.session_state:
+        st.session_state.file_access = False
 
+    # Web Search Toggle
     web_search_enabled = st.toggle(
         "🌐 Web Search",
         value=st.session_state.web_search,
-        help="Enable web search for real-time information"
+        help="Enable web search for real-time information (Exa > Tavily > Google PSE > OpenAI)"
     )
     if web_search_enabled != st.session_state.web_search:
         st.session_state.web_search = web_search_enabled
+
+    # Web Fetch Toggle
+    web_fetch_enabled = st.toggle(
+        "📥 Web Fetch",
+        value=st.session_state.web_fetch,
+        help="Fetch and extract content from URLs in your messages"
+    )
+    if web_fetch_enabled != st.session_state.web_fetch:
+        st.session_state.web_fetch = web_fetch_enabled
+
+    # File Access Toggle
+    file_access_enabled = st.toggle(
+        "📂 File Access",
+        value=st.session_state.file_access,
+        help="Allow reading whitelisted local files (configure in Sema File Access below)"
+    )
+    if file_access_enabled != st.session_state.file_access:
+        st.session_state.file_access = file_access_enabled
 
     st.divider()
 
@@ -721,7 +747,9 @@ with tab1:
                 chat_payload = {
                     "query": prompt,
                     "previous_response_id": prev_id,
-                    "web_search": st.session_state.web_search
+                    "web_search": st.session_state.web_search,
+                    "web_fetch": st.session_state.web_fetch,
+                    "file_access": st.session_state.file_access,
                 }
                 result = api_request(
                     "POST",

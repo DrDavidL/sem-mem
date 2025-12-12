@@ -98,6 +98,30 @@ response = memory.chat_with_memory(query, auto_remember=False)
 - `remember: <text>` - Add to semantic memory (L2 HNSW index)
 - Regular text - Query with RAG from semantic memory
 
+## Tools (Optional)
+
+All tools are **disabled by default** and can be enabled via UI toggles in the Streamlit sidebar under "🔧 Tools".
+
+### Web Search
+Search the web for real-time information. Supports multiple backends (priority order):
+1. **Exa** - AI-native search with structured results (set `EXA_API_KEY`)
+2. **Tavily** - AI-native search for LLM apps (set `TAVILY_API_KEY`)
+3. **Google PSE** - Programmable Search Engine (set `GOOGLE_PSE_API_KEY` + `GOOGLE_PSE_ENGINE_ID`)
+4. **OpenAI** - Fallback using `web_search_preview` tool
+
+### Web Fetch
+Fetch and extract content from URLs mentioned in messages. When enabled:
+- Automatically detects URLs in user messages
+- Fetches up to 3 URLs per message
+- Extracts main content from HTML (removes nav, headers, scripts)
+- Supports HTML, plain text, and JSON content types
+- Security: blocks localhost, private IPs, configurable domain lists
+
+### File Access
+Allow the agent to see whitelisted local files. Configure which files are accessible via:
+- Sidebar "📂 Sema File Access" section
+- `sema_files.txt` whitelist file (paths relative to repo root)
+
 ## Development
 
 ```bash

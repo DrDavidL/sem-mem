@@ -26,7 +26,12 @@ from .config import (
 )
 from .vector_index import HNSWIndex
 from .providers import get_chat_provider
-from .web_search import WebSearchManager, format_search_results_for_context
+from .web_search import (
+    WebSearchManager,
+    format_search_results_for_context,
+    WebFetcher,
+    format_fetch_result_for_context,
+)
 
 
 class AsyncSemanticMemory:
@@ -52,6 +57,7 @@ class AsyncSemanticMemory:
         include_memory_context: bool = True,
         include_file_access: bool = False,
         web_search: bool = False,
+        web_fetch: bool = False,
     ):
         # Resolve API key
         resolved_api_key = api_key or get_api_key(provider=DEFAULT_CHAT_PROVIDER)
@@ -68,9 +74,13 @@ class AsyncSemanticMemory:
         self.include_memory_context = include_memory_context
         self.include_file_access = include_file_access
         self.web_search_enabled = web_search
+        self.web_fetch_enabled = web_fetch
 
-        # Web search manager (auto-detects Google PSE or falls back to OpenAI)
+        # Web search manager (auto-detects Exa > Tavily > Google PSE > OpenAI)
         self._web_search = WebSearchManager()
+
+        # Web fetcher for URL content extraction
+        self._web_fetcher = WebFetcher()
 
         # Initialize sync chat provider for consolidator and other sync operations
         self._chat_provider = get_chat_provider(
@@ -125,6 +135,11 @@ class AsyncSemanticMemory:
         return self._web_search.is_exa_available()
 
     @property
+    def is_tavily_available(self) -> bool:
+        """Check if Tavily is configured for web search."""
+        return self._web_search.is_tavily_available()
+
+    @property
     def is_google_pse_available(self) -> bool:
         """Check if Google PSE is configured for web search."""
         return self._web_search.is_google_pse_available()
@@ -133,6 +148,35 @@ class AsyncSemanticMemory:
     def web_search_backend(self) -> str:
         """Get the active web search backend name."""
         return self._web_search.get_available_backend()
+
+    def fetch_url(self, url: str) -> tuple:
+        """
+        Fetch content from a URL.
+
+        Args:
+            url: URL to fetch
+
+        Returns:
+            Tuple of (formatted_content, success)
+        """
+        result = self._web_fetcher.fetch(url)
+        formatted = format_fetch_result_for_context(result)
+        return formatted, result.success
+
+    def _extract_urls(self, text: str) -> List[str]:
+        """Extract URLs from text."""
+        import re
+        # Match http/https URLs
+        url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+        urls = re.findall(url_pattern, text)
+        # Clean trailing punctuation
+        cleaned = []
+        for url in urls:
+            # Remove trailing punctuation that's likely not part of the URL
+            url = url.rstrip('.,;:!?)\'"]')
+            if url:
+                cleaned.append(url)
+        return cleaned
 
     async def load_instructions(self) -> str:
         """Load user instructions from file.
@@ -518,6 +562,7 @@ class AsyncSemanticMemory:
         reasoning_effort: Optional[str] = None,
         auto_remember: Optional[bool] = None,
         web_search: Optional[bool] = None,
+        web_fetch: Optional[bool] = None,
         instructions: Optional[str] = None,
     ) -> Tuple[str, str, List[str], List[str]]:
         """
@@ -530,6 +575,7 @@ class AsyncSemanticMemory:
             reasoning_effort: For reasoning models: "low", "medium", "high"
             auto_remember: Override auto-memory setting for this call
             web_search: Override web search setting for this call
+            web_fetch: Override web fetch setting for this call
             instructions: Override instructions (None = use global instructions.txt)
 
         Returns:
@@ -556,6 +602,7 @@ class AsyncSemanticMemory:
         use_model = model or self.chat_model
         use_reasoning = reasoning_effort or self.reasoning_effort
         use_web_search = web_search if web_search is not None else self.web_search_enabled
+        use_web_fetch = web_fetch if web_fetch is not None else self.web_fetch_enabled
 
         # Build base parameters
         create_params: Dict = {
@@ -567,17 +614,22 @@ class AsyncSemanticMemory:
         if previous_response_id:
             create_params["previous_response_id"] = previous_response_id
 
-        # Web search: use best available backend (Exa > Google PSE > OpenAI)
+        # Web search: use best available backend (Exa > Tavily > Google PSE > OpenAI)
         if use_web_search:
             backend = self._web_search.get_available_backend()
-            if backend in ("exa", "google_pse"):
-                # Use Exa or Google PSE (inject results as context)
+            if backend in ("exa", "tavily", "google_pse"):
+                # Use Exa, Tavily, or Google PSE (inject results as context)
                 try:
                     search_response = self._web_search.search(user_query, num_results=5)
                     if search_response and search_response.results:
                         web_context = format_search_results_for_context(search_response)
                         create_params["input"] = f"{web_context}\n\n{input_text}"
-                        backend_name = "Exa" if search_response.backend == "exa" else "Google PSE"
+                        backend_names = {
+                            "exa": "Exa",
+                            "tavily": "Tavily",
+                            "google_pse": "Google PSE"
+                        }
+                        backend_name = backend_names.get(search_response.backend, search_response.backend)
                         logs.append(f"🔍 {backend_name}: {len(search_response.results)} results")
                 except Exception as e:
                     logs.append(f"⚠️ {backend} error: {e}")
@@ -588,6 +640,22 @@ class AsyncSemanticMemory:
                 # Use OpenAI's web_search_preview tool
                 create_params["tools"] = [{"type": "web_search_preview"}]
                 logs.append("🌐 OpenAI web search enabled")
+
+        # Web fetch: extract content from URLs in the query
+        if use_web_fetch:
+            urls = self._extract_urls(user_query)
+            if urls:
+                fetched_contents = []
+                for url in urls[:3]:  # Limit to 3 URLs
+                    content, success = self.fetch_url(url)
+                    if success:
+                        fetched_contents.append(content)
+                        logs.append(f"📥 Fetched: {url}")
+                    else:
+                        logs.append(f"⚠️ Fetch failed: {url}")
+                if fetched_contents:
+                    web_fetch_context = "\n\n---\n\n".join(fetched_contents)
+                    create_params["input"] = f"Fetched URL content:\n{web_fetch_context}\n\n{create_params['input']}"
 
         # Reasoning models (gpt-5.1, o1, o3) require special handling
         if use_model in ("gpt-5.1", "o1", "o3"):

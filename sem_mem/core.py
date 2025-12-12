@@ -35,7 +35,12 @@ from .providers import (
     BaseChatProvider,
     BaseEmbeddingProvider,
 )
-from .web_search import WebSearchManager, format_search_results_for_context
+from .web_search import (
+    WebSearchManager,
+    format_search_results_for_context,
+    WebFetcher,
+    format_fetch_result_for_context,
+)
 
 if TYPE_CHECKING:
     from openai import OpenAI
@@ -323,6 +328,7 @@ class SemanticMemory:
         include_memory_context: bool = True,
         include_file_access: bool = False,
         web_search: bool = False,
+        web_fetch: bool = False,
     ):
         """
         Initialize SemanticMemory with provider abstraction.
@@ -345,6 +351,7 @@ class SemanticMemory:
             include_memory_context: Include memory system context in instructions.
             include_file_access: Include file access context.
             web_search: Enable web search tool.
+            web_fetch: Enable web fetch tool (URL content extraction).
         """
         # Resolve provider names from env if not specified
         chat_provider = chat_provider or os.getenv("SEMMEM_CHAT_PROVIDER", DEFAULT_CHAT_PROVIDER)
@@ -392,9 +399,13 @@ class SemanticMemory:
         self.include_memory_context = include_memory_context
         self.include_file_access = include_file_access
         self.web_search_enabled = web_search
+        self.web_fetch_enabled = web_fetch
 
-        # Web search manager (auto-detects Google PSE or falls back to OpenAI)
+        # Web search manager (auto-detects Exa > Tavily > Google PSE > OpenAI)
         self._web_search = WebSearchManager()
+
+        # Web fetcher for URL content extraction
+        self._web_fetcher = WebFetcher()
 
         # Segmented LRU cache for hot items (L1)
         self.local_cache = SmartCache(capacity=cache_size)
@@ -466,6 +477,11 @@ class SemanticMemory:
         return self._web_search.is_exa_available()
 
     @property
+    def is_tavily_available(self) -> bool:
+        """Check if Tavily is configured for web search."""
+        return self._web_search.is_tavily_available()
+
+    @property
     def is_google_pse_available(self) -> bool:
         """Check if Google PSE is configured for web search."""
         return self._web_search.is_google_pse_available()
@@ -474,6 +490,35 @@ class SemanticMemory:
     def web_search_backend(self) -> Optional[str]:
         """Get the active web search backend name."""
         return self._web_search.get_available_backend()
+
+    def fetch_url(self, url: str) -> tuple[str, bool]:
+        """
+        Fetch content from a URL.
+
+        Args:
+            url: URL to fetch
+
+        Returns:
+            Tuple of (formatted_content, success)
+        """
+        result = self._web_fetcher.fetch(url)
+        formatted = format_fetch_result_for_context(result)
+        return formatted, result.success
+
+    def _extract_urls(self, text: str) -> List[str]:
+        """Extract URLs from text."""
+        import re
+        # Match http/https URLs
+        url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+        urls = re.findall(url_pattern, text)
+        # Clean trailing punctuation
+        cleaned = []
+        for url in urls:
+            # Remove trailing punctuation that's likely not part of the URL
+            url = url.rstrip('.,;:!?)\'"]')
+            if url:
+                cleaned.append(url)
+        return cleaned
 
     def _load_lexical_index(self) -> None:
         """Load lexical index from disk, rebuilding if needed."""
@@ -1084,6 +1129,7 @@ class SemanticMemory:
         reasoning_effort: Optional[str] = None,
         auto_remember: Optional[bool] = None,
         web_search: Optional[bool] = None,
+        web_fetch: Optional[bool] = None,
         instructions: Optional[str] = None,
     ):
         """
@@ -1101,6 +1147,7 @@ class SemanticMemory:
             reasoning_effort: For reasoning models: "low", "medium", "high"
             auto_remember: Override auto-memory setting for this call
             web_search: Override web search setting for this call
+            web_fetch: Override web fetch setting for this call
             instructions: Override instructions (None = use global instructions.txt)
 
         Returns:
@@ -1128,21 +1175,27 @@ class SemanticMemory:
         use_model = model or self.chat_model
         use_reasoning = reasoning_effort or self.reasoning_effort
         use_web_search = web_search if web_search is not None else self.web_search_enabled
+        use_web_fetch = web_fetch if web_fetch is not None else self.web_fetch_enabled
 
         # Build provider-specific kwargs
         kwargs: Dict = {}
 
-        # Web search: use best available backend (Exa > Google PSE > OpenAI)
+        # Web search: use best available backend (Exa > Tavily > Google PSE > OpenAI)
         web_search_context = ""
         if use_web_search:
             backend = self._web_search.get_available_backend()
-            if backend in ("exa", "google_pse"):
-                # Use Exa or Google PSE (inject results as context)
+            if backend in ("exa", "tavily", "google_pse"):
+                # Use Exa, Tavily, or Google PSE (inject results as context)
                 try:
                     search_response = self._web_search.search(user_query, num_results=5)
                     if search_response and search_response.results:
                         web_search_context = format_search_results_for_context(search_response)
-                        backend_name = "Exa" if search_response.backend == "exa" else "Google PSE"
+                        backend_names = {
+                            "exa": "Exa",
+                            "tavily": "Tavily",
+                            "google_pse": "Google PSE"
+                        }
+                        backend_name = backend_names.get(search_response.backend, search_response.backend)
                         logs.append(f"🔍 {backend_name}: {len(search_response.results)} results")
                 except Exception as e:
                     logs.append(f"⚠️ {backend} error: {e}")
@@ -1154,6 +1207,22 @@ class SemanticMemory:
                 kwargs["tools"] = [{"type": "web_search_preview"}]
                 logs.append("🌐 OpenAI web search enabled")
 
+        # Web fetch: extract content from URLs in the query
+        web_fetch_context = ""
+        if use_web_fetch:
+            urls = self._extract_urls(user_query)
+            if urls:
+                fetched_contents = []
+                for url in urls[:3]:  # Limit to 3 URLs
+                    content, success = self.fetch_url(url)
+                    if success:
+                        fetched_contents.append(content)
+                        logs.append(f"📥 Fetched: {url}")
+                    else:
+                        logs.append(f"⚠️ Fetch failed: {url}")
+                if fetched_contents:
+                    web_fetch_context = "\n\n---\n\n".join(fetched_contents)
+
         # Reasoning models require special handling
         if self._is_reasoning_model(use_model):
             kwargs["reasoning_effort"] = use_reasoning
@@ -1161,9 +1230,13 @@ class SemanticMemory:
         else:
             kwargs["temperature"] = 0.7
 
-        # Inject web search results into context (for Google PSE)
+        # Inject web search results into context
         if web_search_context:
             input_text = f"{web_search_context}\n\n{input_text}"
+
+        # Inject fetched URL content into context
+        if web_fetch_context:
+            input_text = f"Fetched URL content:\n{web_fetch_context}\n\n{input_text}"
 
         # For Responses API, we pass input_text as messages with one user message
         # The provider will handle Responses API vs Chat Completions based on previous_response_id

@@ -535,17 +535,23 @@ with st.sidebar:
             st.session_state.reasoning_effort = selected_effort
             agent.reasoning_effort = selected_effort
 
+    # Tools Section
+    st.header("🔧 Tools")
+
     # Web Search Toggle
     web_backend = agent.web_search_backend
     if agent.is_exa_available:
         backend_label = "Exa"
         backend_help = "Using Exa AI-native search for real-time data."
+    elif agent.is_tavily_available:
+        backend_label = "Tavily"
+        backend_help = "Using Tavily AI-native search for LLM apps."
     elif agent.is_google_pse_available:
         backend_label = "Google PSE"
         backend_help = "Using Google Programmable Search Engine."
     else:
         backend_label = "OpenAI"
-        backend_help = "Set EXA_API_KEY or GOOGLE_PSE_API_KEY in .env for better search."
+        backend_help = "Set EXA_API_KEY or TAVILY_API_KEY in .env for better search."
     web_search_enabled = st.toggle(
         f"🌐 Web Search ({backend_label})",
         value=st.session_state.get("web_search", False),
@@ -554,6 +560,26 @@ with st.sidebar:
     if web_search_enabled != st.session_state.get("web_search", False):
         st.session_state.web_search = web_search_enabled
         agent.web_search_enabled = web_search_enabled
+
+    # Web Fetch Toggle
+    web_fetch_enabled = st.toggle(
+        "📥 Web Fetch",
+        value=st.session_state.get("web_fetch", False),
+        help="Fetch and extract content from URLs in your messages"
+    )
+    if web_fetch_enabled != st.session_state.get("web_fetch", False):
+        st.session_state.web_fetch = web_fetch_enabled
+        agent.web_fetch_enabled = web_fetch_enabled
+
+    # File Access Toggle
+    file_access_enabled = st.toggle(
+        "📂 File Access",
+        value=st.session_state.get("file_access", False),
+        help="Allow reading whitelisted local files (configure in Sema File Access below)"
+    )
+    if file_access_enabled != st.session_state.get("file_access", False):
+        st.session_state.file_access = file_access_enabled
+        agent.include_file_access = file_access_enabled
 
     st.divider()
 

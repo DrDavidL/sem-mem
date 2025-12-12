@@ -36,6 +36,8 @@ class ChatRequest(BaseModel):
     reasoning_effort: Optional[str] = Field(None, description="For reasoning models: low, medium, high")
     auto_remember: Optional[bool] = Field(None, description="Override auto-memory for this request")
     web_search: Optional[bool] = Field(None, description="Enable web search for this request")
+    web_fetch: Optional[bool] = Field(None, description="Enable web fetch (URL content extraction) for this request")
+    file_access: Optional[bool] = Field(None, description="Enable file access context for this request")
 
 
 class ChatResponse(BaseModel):
@@ -178,8 +180,12 @@ async def chat(
     """
     Chat with RAG-enhanced responses.
     Maintains conversation state via previous_response_id.
-    Optionally specify model, reasoning_effort, auto_remember, and web_search.
+    Optionally specify model, reasoning_effort, auto_remember, web_search, and web_fetch.
     """
+    # Update file access setting if provided
+    if request.file_access is not None:
+        mem.include_file_access = request.file_access
+
     response_text, response_id, memories, logs = await mem.chat_with_memory(
         request.query,
         previous_response_id=request.previous_response_id,
@@ -187,6 +193,7 @@ async def chat(
         reasoning_effort=request.reasoning_effort,
         auto_remember=request.auto_remember,
         web_search=request.web_search,
+        web_fetch=request.web_fetch,
     )
     return ChatResponse(
         response=response_text,

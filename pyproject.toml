@@ -30,7 +30,8 @@ dependencies = [
     "pypdf>=3.17.0",
     "python-dotenv>=1.0.0",
     "hnswlib>=0.8.0",
-    "requests>=2.31.0",  # For Google PSE web search
+    "requests>=2.31.0",  # For web search and fetch
+    "beautifulsoup4>=4.12.0",  # For web fetch HTML parsing
 ]
 
 [project.optional-dependencies]
