@@ -2,6 +2,22 @@
 
 Tiered semantic memory system for AI agents using HNSW-based vector indexing.
 
+## Recent Improvements
+
+These changes make Sem-Mem more inspectable, trustworthy, and production-friendly: you can see how memory evolved, why certain facts were preferred, and what each background pass actually did.
+
+- **Structured progress logging** - Each consolidation run records what changed and why in a machine-readable log (`progress_log.jsonl`), making long-running memory evolution auditable and debuggable.
+
+- **Project manifests & progress summaries** - Per-project / per-thread "manifest" and "what we did / what's next" memories (`save_project_manifest()`, `append_thread_progress()`) make it easy for both humans and agents to re-enter complex work without re-reading long threads.
+
+- **Smarter status & progress queries** - Queries like "what's the status of X?" preferentially surface manifests and progress logs, so you get a concise state-of-the-world answer instead of raw history dumps.
+
+- **Explicit conflict handling & precedence** - Conflicting memories (fact vs. correction, old vs. new policy) are handled via clear rules: explicit correction entries, recency and utility bias, and no silent overwrites. See [Conflict Handling & Precedence](#conflict-handling--precedence).
+
+- **Contradiction surfacing, not silent fixes** - Detected contradictions are logged (with memory IDs and summaries) to `contradictions.json` for human review, providing a clear trail of "what disagrees with what" instead of hidden heuristics.
+
+- **Stronger guarantees about consolidation behavior** - Consolidation is explicitly offline, human-scheduled, and non-agentic, with hard caps on changes per run (`CONSOLIDATION_MAX_NEW_PATTERNS`) and clear configuration describing its role.
+
 ## Architecture
 
 - **SmartCache (L1)**: Segmented LRU in RAM with Protected/Probation tiers
@@ -355,3 +371,56 @@ response, resp_id, mems, logs = memory.chat_with_memory(
 - Role-playing: historical figures, fictional characters
 - Specialized contexts: medical terminology vs layman explanations
 - Language/tone: formal vs casual, verbose vs concise
+
+## Conflict Handling & Precedence
+
+When memories contain conflicting information, the system follows these rules:
+
+### How Conflicts Are Handled
+
+1. **Corrections are stored as separate memories** - When a user corrects earlier information (e.g., "Actually, my name is spelled differently"), a new memory is created with `kind="correction"`. The old memory is not deleted.
+
+2. **Corrections are surfaced after older facts** - In `_format_memories_for_display()`, regular memories appear first, then corrections appear last with `[CORRECTION]` prefix. This ensures the model sees the correction as the authoritative version.
+
+3. **Time-decay + utility nudge toward recent corrections** - Recent memories score higher via time-decay. Corrections that get positive feedback accumulate higher utility scores, making them more likely to be retrieved.
+
+4. **No silent deletion** - Old memories are never deleted when contradicted. Instead:
+   - Consolidation may demote them via `record_outcome(id, "failure")`
+   - Time decay naturally reduces their retrieval priority
+   - They remain available for audit/history
+
+### Contradiction Detection
+
+The consolidator flags potential contradictions for human review:
+- Stored in `local_memory/contradictions.json`
+- Each entry: `{"ids": [id1, id2], "summary": "...", "status": "pending_review", "detected_at": "..."}`
+- Contradictions are **never auto-resolved** - humans must review and decide
+
+### Memory Kinds for Retrieval
+
+| Kind | Description | Retrieval Behavior |
+|------|-------------|-------------------|
+| `fact` | General information | Standard scoring |
+| `identity` | Who the user is | Standard scoring |
+| `preference` | User preferences | Standard scoring |
+| `decision` | Decisions made together | Standard scoring |
+| `correction` | Updates to prior info | Displayed last with `[CORRECTION]` prefix |
+| `pattern` | Stable principle from consolidation | Slightly boosted via utility |
+| `project_manifest` | Project state/goals | Boosted for "status" queries |
+| `progress_log` | Session progress notes | Boosted for "status" queries |
+
+### Example: Correction Flow
+
+```python
+# User initially says:
+"My favorite color is blue"
+# -> Stored as kind="fact"
+
+# Later user corrects:
+"Actually, my favorite color is green"
+# -> Stored as kind="correction", old memory remains
+
+# On retrieval for "What's my favorite color?":
+# -> Returns: ["My favorite color is blue", "[CORRECTION] My favorite color is green"]
+# -> Model sees correction last, treats it as authoritative
+```

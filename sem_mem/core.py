@@ -558,6 +558,33 @@ class SemanticMemory:
         """Save lexical index to disk."""
         self.lexical_index.save(self._lexical_index_path)
 
+    # Regex patterns for detecting status/progress queries
+    _STATUS_QUERY_PATTERNS = [
+        r"\bstatus\b",
+        r"\bwhat did we do\b",
+        r"\bwhat'?s next\b",
+        r"\bprogress\b",
+        r"\bwhere were we\b",
+        r"\bwhat'?s the state\b",
+        r"\bcurrent state\b",
+        r"\bproject state\b",
+        r"\bwhat have we\b",
+        r"\blast time\b",
+    ]
+
+    def _is_status_query(self, query: str) -> bool:
+        """
+        Check if query looks like a status/progress request.
+
+        Used to apply a small boost to project_manifest and progress_log memories.
+        """
+        import re
+        query_lower = query.lower()
+        for pattern in self._STATUS_QUERY_PATTERNS:
+            if re.search(pattern, query_lower):
+                return True
+        return False
+
     def _expand_query(self, query: str) -> List[str]:
         """
         Use a fast/cheap model to generate alternative search queries.
@@ -885,6 +912,19 @@ class SemanticMemory:
             time_adjusted.sort(key=lambda x: x[0], reverse=True)
             adjusted = time_adjusted
             logs.append("⏱️ Applied time-decay scoring")
+
+        # Apply manifest/progress boost for status queries
+        # Small bonus (+0.02-0.05) when query looks like a status request
+        if self._is_status_query(query):
+            boosted = []
+            for final_score, sim_score, memory_id, entry in adjusted:
+                kind = entry.get("metadata", {}).get("kind")
+                if kind in ("project_manifest", "progress_log"):
+                    final_score += 0.03  # Small, non-dominant boost
+                boosted.append((final_score, sim_score, memory_id, entry))
+            boosted.sort(key=lambda x: x[0], reverse=True)
+            adjusted = boosted
+            logs.append("📋 Applied manifest/progress boost")
 
         # Limit results
         top_results = adjusted[:limit]
@@ -1581,3 +1621,69 @@ class SemanticMemory:
             True if deleted, False if didn't exist
         """
         return self._backup.delete_backup(backup_name)
+
+    # ==========================================================================
+    # Project Manifest & Progress Log Methods
+    # ==========================================================================
+
+    def save_project_manifest(
+        self,
+        project_name: str,
+        text: str,
+        metadata: Optional[Dict] = None,
+    ) -> Tuple[int, bool]:
+        """
+        Save or update a project manifest memory.
+
+        A project manifest stores the current state, goals, and key information
+        about a project. Useful for multi-session work where the AI needs
+        context about what the project is and what's been done.
+
+        Args:
+            project_name: Project identifier (e.g., "sem-mem", "my-app")
+            text: Manifest content (project description, goals, current state)
+            metadata: Additional metadata
+
+        Returns:
+            Tuple of (memory_id, is_new) where is_new is False if text already existed
+        """
+        combined_meta = dict(metadata or {})
+        combined_meta["kind"] = "project_manifest"
+        combined_meta["project_name"] = project_name
+
+        return self.save_memory(
+            text=text,
+            kind="project_manifest",
+            metadata=combined_meta,
+        )
+
+    def append_thread_progress(
+        self,
+        thread_name: str,
+        text: str,
+        metadata: Optional[Dict] = None,
+    ) -> Tuple[int, bool]:
+        """
+        Append a progress log entry for a thread.
+
+        Progress logs capture "what we did / what's next" summaries that
+        help with continuity across sessions. Unlike ephemeral conversation
+        history, these are stored in L2 for semantic retrieval.
+
+        Args:
+            thread_name: Thread/session identifier
+            text: Progress summary (e.g., "Implemented auth flow. Next: add tests.")
+            metadata: Additional metadata
+
+        Returns:
+            Tuple of (memory_id, is_new) where is_new is False if text already existed
+        """
+        combined_meta = dict(metadata or {})
+        combined_meta["kind"] = "progress_log"
+        combined_meta["thread_name"] = thread_name
+
+        return self.save_memory(
+            text=text,
+            kind="progress_log",
+            metadata=combined_meta,
+        )

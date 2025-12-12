@@ -25,6 +25,7 @@ from sem_mem.async_core import AsyncSemanticMemory
 from sem_mem.config import get_api_key, get_config, CHAT_MODELS, REASONING_EFFORTS, DEFAULT_CHAT_MODEL
 from sem_mem.api.files import router as files_router
 from sem_mem.api.backup import backup_router, threads_router, get_memory as backup_get_memory
+from sem_mem.progress import ProgressLog
 
 
 # --- Pydantic Models ---
@@ -444,6 +445,35 @@ async def run_consolidation(
     stats = consolidator.run_once()
 
     return stats
+
+
+@app.get("/progress")
+async def get_progress(
+    limit: int = Query(50, ge=1, le=500, description="Maximum entries to return"),
+    component: Optional[str] = Query(None, description="Filter by component (consolidation, ingestion, etc.)"),
+    mem: AsyncSemanticMemory = Depends(get_memory),
+):
+    """
+    Get recent progress log entries.
+
+    Returns entries from background processes like consolidation,
+    ordered by most recent first.
+
+    Args:
+        limit: Maximum number of entries to return (default: 50)
+        component: Optional filter by component type
+
+    Returns:
+        List of progress log entries with timestamp, component, summary, details.
+    """
+    progress = ProgressLog(storage_dir=mem.vector_index.storage_dir)
+
+    if component:
+        entries = progress.read_by_component(component, limit=limit)
+    else:
+        entries = progress.read_recent(limit=limit)
+
+    return {"entries": entries, "count": len(entries)}
 
 
 if __name__ == "__main__":

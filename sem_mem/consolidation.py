@@ -8,6 +8,12 @@ Periodically reviews memories to:
 
 Key principle: Transparent objectives defined by the system designer,
 not self-generated goals.
+
+Architecture notes:
+- Offline: Runs on external schedule (cron, manual trigger), not during user queries
+- Bounded: Limited changes per run via CONSOLIDATION_MAX_NEW_PATTERNS
+- Non-agentic: Objectives are fixed by the designer, never self-invented
+- Auditable: All runs logged to progress_log.jsonl with affected IDs
 """
 
 import json
@@ -25,6 +31,7 @@ from .config import (
     CONSOLIDATION_MODEL,
     CONSOLIDATION_OBJECTIVES,
 )
+from .progress import ProgressLog
 
 if TYPE_CHECKING:
     from .core import SemanticMemory
@@ -47,6 +54,12 @@ You will receive a list of memories (facts, preferences, decisions, corrections)
 
 Your consolidation objectives (defined by the system designer):
 {objectives}
+
+CRITICAL CONSTRAINTS:
+- Do NOT invent new goals beyond those listed above.
+- Do NOT auto-resolve contradictions. Surface them for human review only.
+- Do NOT delete or overwrite old memories. Demotions are soft (utility score adjustments).
+- Keep changes small and explainable. Each pattern/demotion needs a clear reason.
 
 Return a JSON object with this exact structure:
 {{
@@ -102,6 +115,8 @@ class Consolidator:
 
         Returns:
             Stats about what changed (or would change in dry_run mode).
+            Includes: patterns_created, pattern_ids, demotions, demotion_ids,
+            contradictions_flagged, contradiction_ids, memories_reviewed, dry_run
         """
         if not CONSOLIDATION_ENABLED:
             return {"skipped": True, "reason": "consolidation disabled"}
@@ -109,12 +124,18 @@ class Consolidator:
         # Step 1: Select memories
         memories = self._select_memories()
         if not memories:
-            return {
+            stats = {
                 "patterns_created": 0,
+                "pattern_ids": [],
                 "demotions": 0,
+                "demotion_ids": [],
                 "contradictions_flagged": 0,
+                "contradiction_ids": [],
                 "memories_reviewed": 0,
+                "dry_run": self.dry_run,
             }
+            self._log_progress(stats)
+            return stats
 
         logger.info(f"Consolidator reviewing {len(memories)} memories")
 
@@ -124,13 +145,19 @@ class Consolidator:
 
         if not llm_output:
             logger.warning("Consolidator: LLM returned no output")
-            return {
+            stats = {
                 "patterns_created": 0,
+                "pattern_ids": [],
                 "demotions": 0,
+                "demotion_ids": [],
                 "contradictions_flagged": 0,
+                "contradiction_ids": [],
                 "memories_reviewed": len(memories),
+                "dry_run": self.dry_run,
                 "error": "LLM returned no output",
             }
+            self._log_progress(stats)
+            return stats
 
         # Step 3: Parse output
         result = self._parse_output(llm_output)
@@ -140,7 +167,51 @@ class Consolidator:
         stats["memories_reviewed"] = len(memories)
         stats["dry_run"] = self.dry_run
 
+        # Step 5: Log to progress log
+        self._log_progress(stats)
+
         return stats
+
+    def _log_progress(self, stats: Dict) -> None:
+        """Log consolidation run to progress log."""
+        try:
+            progress = ProgressLog(storage_dir=self.memory.vector_index.storage_dir)
+
+            # Build summary
+            mode = "[DRY RUN] " if stats.get("dry_run") else ""
+            parts = []
+            if stats.get("patterns_created"):
+                parts.append(f"{stats['patterns_created']} patterns")
+            if stats.get("demotions"):
+                parts.append(f"{stats['demotions']} demotions")
+            if stats.get("contradictions_flagged"):
+                parts.append(f"{stats['contradictions_flagged']} contradictions")
+
+            memories_reviewed = stats.get("memories_reviewed", 0)
+            if parts:
+                summary = f"{mode}Consolidation: {', '.join(parts)} from {memories_reviewed} memories."
+            else:
+                summary = f"{mode}Consolidation: no changes from {memories_reviewed} memories."
+
+            if stats.get("error"):
+                summary += f" Error: {stats['error']}"
+
+            progress.append(
+                component="consolidation",
+                summary=summary,
+                details={
+                    "dry_run": stats.get("dry_run", False),
+                    "memories_reviewed": memories_reviewed,
+                    "patterns_created": stats.get("patterns_created", 0),
+                    "pattern_ids": stats.get("pattern_ids", []),
+                    "demotions": stats.get("demotions", 0),
+                    "demotion_ids": stats.get("demotion_ids", []),
+                    "contradictions_flagged": stats.get("contradictions_flagged", 0),
+                    "contradiction_ids": stats.get("contradiction_ids", []),
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to log consolidation progress: {e}")
 
     def _select_memories(self) -> List[Dict]:
         """Select memories for consolidation review."""
@@ -231,11 +302,17 @@ class Consolidator:
         demotions = 0
         contradictions_flagged = 0
 
+        # Track IDs for progress logging
+        pattern_ids: List[int] = []
+        demotion_ids: List[int] = []
+        contradiction_id_pairs: List[List[int]] = []
+
         # Build ID lookup for validation
         valid_ids = {m["id"] for m in memories}
 
-        # Process patterns
-        for p in result["patterns"][:self.max_patterns]:
+        # Process patterns (hard cap enforced here)
+        patterns_to_process = result["patterns"][:self.max_patterns]
+        for p in patterns_to_process:
             pattern_text = p.get("text", "").strip()
             if not pattern_text:
                 continue
@@ -247,8 +324,9 @@ class Consolidator:
 
             if self.dry_run:
                 logger.info(f"[DRY RUN] Would create pattern: {pattern_text[:100]}...")
+                pattern_ids.append(-1)  # Placeholder for dry run
             else:
-                self.memory.save_memory(
+                memory_id, is_new = self.memory.save_memory(
                     text=pattern_text,
                     kind="pattern",
                     metadata={
@@ -257,7 +335,8 @@ class Consolidator:
                         "reasoning": p.get("reasoning", ""),
                     },
                 )
-                logger.info(f"Created pattern: {pattern_text[:50]}...")
+                pattern_ids.append(memory_id)
+                logger.info(f"Created pattern (id={memory_id}): {pattern_text[:50]}...")
 
             patterns_created += 1
 
@@ -273,6 +352,7 @@ class Consolidator:
                 self._demote_memory(memory_id)
                 logger.info(f"Demoted memory {memory_id}: {d.get('reason', '')}")
 
+            demotion_ids.append(memory_id)
             demotions += 1
 
         # Process contradictions
@@ -283,12 +363,20 @@ class Consolidator:
             else:
                 self._store_contradictions(contradictions)
 
+            for c in contradictions:
+                ids = c.get("ids", [])
+                if len(ids) >= 2:
+                    contradiction_id_pairs.append(ids[:2])
+
             contradictions_flagged = len(contradictions)
 
         return {
             "patterns_created": patterns_created,
+            "pattern_ids": pattern_ids,
             "demotions": demotions,
+            "demotion_ids": demotion_ids,
             "contradictions_flagged": contradictions_flagged,
+            "contradiction_ids": contradiction_id_pairs,
         }
 
     def _pattern_exists(self, pattern_text: str) -> bool:
@@ -356,3 +444,80 @@ class Consolidator:
             json.dump(existing, f, indent=2)
 
         logger.info(f"Stored {len(contradictions)} contradictions for review")
+
+
+# =============================================================================
+# Standalone helpers for contradiction management
+# =============================================================================
+
+def load_contradictions(storage_dir: str) -> List[Dict]:
+    """
+    Load contradictions flagged for human review.
+
+    Args:
+        storage_dir: Directory containing contradictions.json
+
+    Returns:
+        List of contradiction entries, each with:
+        - ids: [id1, id2] of conflicting memories
+        - summary: Description of the conflict
+        - status: "pending_review" | "resolved" | "dismissed"
+        - detected_at: ISO timestamp
+    """
+    contradictions_file = os.path.join(storage_dir, "contradictions.json")
+    if not os.path.exists(contradictions_file):
+        return []
+
+    try:
+        with open(contradictions_file, 'r') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def get_pending_contradictions(storage_dir: str) -> List[Dict]:
+    """
+    Get only contradictions with status='pending_review'.
+
+    Args:
+        storage_dir: Directory containing contradictions.json
+
+    Returns:
+        Filtered list of pending contradictions
+    """
+    all_contradictions = load_contradictions(storage_dir)
+    return [c for c in all_contradictions if c.get("status") == "pending_review"]
+
+
+def update_contradiction_status(
+    storage_dir: str,
+    contradiction_ids: List[int],
+    new_status: str,
+) -> bool:
+    """
+    Update the status of a contradiction.
+
+    Args:
+        storage_dir: Directory containing contradictions.json
+        contradiction_ids: The [id1, id2] pair identifying the contradiction
+        new_status: New status ("resolved", "dismissed", etc.)
+
+    Returns:
+        True if found and updated, False if not found
+    """
+    contradictions_file = os.path.join(storage_dir, "contradictions.json")
+    all_contradictions = load_contradictions(storage_dir)
+
+    found = False
+    for c in all_contradictions:
+        if set(c.get("ids", [])) == set(contradiction_ids):
+            c["status"] = new_status
+            c["resolved_at"] = datetime.now().isoformat()
+            found = True
+            break
+
+    if found:
+        with open(contradictions_file, 'w') as f:
+            json.dump(all_contradictions, f, indent=2)
+
+    return found

@@ -10,6 +10,7 @@ import numpy as np
 
 from sem_mem.vector_index import HNSWIndex
 from sem_mem.consolidation import Consolidator, CONSOLIDATION_SYSTEM_PROMPT
+from sem_mem.auto_memory import MEMORY_KIND_CORRECTION, MEMORY_KIND_FACT
 
 
 class TestCreatedAtField:
@@ -427,3 +428,104 @@ class TestFormatForLLM:
         output = consolidator._format_for_llm(memories)
 
         assert "utility=0.75" in output
+
+
+class TestCorrectionOrdering:
+    """Test that corrections appear after regular facts in formatted output.
+
+    This ensures the model sees corrections last, treating them as authoritative.
+    See CLAUDE.md "Conflict Handling & Precedence" for design rationale.
+    """
+
+    def test_corrections_appear_last_in_formatted_output(self):
+        """_format_memories_for_display should put corrections at the end."""
+        from sem_mem.core import SemanticMemory
+
+        # Create structured memory strings (as they would appear in L2)
+        fact_memory = json.dumps({
+            "text": "My favorite color is blue",
+            "kind": MEMORY_KIND_FACT,
+        })
+        correction_memory = json.dumps({
+            "text": "My favorite color is green",
+            "kind": MEMORY_KIND_CORRECTION,
+        })
+        identity_memory = json.dumps({
+            "text": "I am a physician",
+            "kind": "identity",
+        })
+
+        # Input has mixed order: correction in the middle
+        memories = [fact_memory, correction_memory, identity_memory]
+
+        # Mock the minimal SemanticMemory needed
+        with patch.object(SemanticMemory, '__init__', lambda self, **kw: None):
+            mem = SemanticMemory()
+            # Call the private method directly
+            result = mem._format_memories_for_display(memories)
+
+        # Corrections should be last, with [CORRECTION] prefix
+        assert len(result) == 3
+        assert "[CORRECTION]" in result[-1]
+        assert "green" in result[-1]
+        # Regular memories appear first
+        assert "[CORRECTION]" not in result[0]
+        assert "[CORRECTION]" not in result[1]
+
+    def test_multiple_corrections_all_at_end(self):
+        """Multiple corrections should all appear at the end."""
+        from sem_mem.core import SemanticMemory
+
+        memories = [
+            json.dumps({"text": "Original fact 1", "kind": MEMORY_KIND_FACT}),
+            json.dumps({"text": "Correction 1", "kind": MEMORY_KIND_CORRECTION}),
+            json.dumps({"text": "Original fact 2", "kind": MEMORY_KIND_FACT}),
+            json.dumps({"text": "Correction 2", "kind": MEMORY_KIND_CORRECTION}),
+        ]
+
+        with patch.object(SemanticMemory, '__init__', lambda self, **kw: None):
+            mem = SemanticMemory()
+            result = mem._format_memories_for_display(memories)
+
+        # First two should be regular facts
+        assert "[CORRECTION]" not in result[0]
+        assert "[CORRECTION]" not in result[1]
+        # Last two should be corrections
+        assert "[CORRECTION]" in result[2]
+        assert "[CORRECTION]" in result[3]
+
+    def test_plain_text_memories_treated_as_facts(self):
+        """Plain text (non-JSON) memories should be treated as facts."""
+        from sem_mem.core import SemanticMemory
+
+        memories = [
+            "Plain text memory",
+            json.dumps({"text": "A correction", "kind": MEMORY_KIND_CORRECTION}),
+        ]
+
+        with patch.object(SemanticMemory, '__init__', lambda self, **kw: None):
+            mem = SemanticMemory()
+            result = mem._format_memories_for_display(memories)
+
+        assert result[0] == "Plain text memory"
+        assert "[CORRECTION]" in result[1]
+
+    def test_no_corrections_returns_original_order(self):
+        """Without corrections, order should be preserved."""
+        from sem_mem.core import SemanticMemory
+
+        memories = [
+            json.dumps({"text": "Fact A", "kind": MEMORY_KIND_FACT}),
+            json.dumps({"text": "Identity B", "kind": "identity"}),
+            json.dumps({"text": "Decision C", "kind": "decision"}),
+        ]
+
+        with patch.object(SemanticMemory, '__init__', lambda self, **kw: None):
+            mem = SemanticMemory()
+            result = mem._format_memories_for_display(memories)
+
+        assert "Fact A" in result[0]
+        assert "Identity B" in result[1]
+        assert "Decision C" in result[2]
+        for r in result:
+            assert "[CORRECTION]" not in r

@@ -133,8 +133,19 @@ TIME_DECAY_ALPHA = 0.3
 # =============================================================================
 # Memory Consolidation
 # =============================================================================
-# Offline routine that reviews memories to create patterns and reduce redundancy.
-# Runs periodically (external scheduling) to distill stable preferences/principles.
+#
+# ARCHITECTURE NOTES:
+# - OFFLINE: Consolidation runs on external schedules (cron, manual trigger),
+#   NOT during user queries. It's a background maintenance task.
+# - BOUNDED: Each run is limited (CONSOLIDATION_MAX_NEW_PATTERNS) to prevent
+#   runaway changes. Small, predictable batches.
+# - NON-AGENTIC: Objectives are fixed by the designer below. The consolidator
+#   MUST NOT invent new goals or self-mutate its objectives.
+# - AUDITABLE: All runs are logged to progress_log.jsonl with affected IDs.
+#   Contradictions are surfaced for human review, never auto-resolved.
+#
+# See sem_mem/consolidation.py for implementation details.
+# =============================================================================
 
 CONSOLIDATION_ENABLED = True
 CONSOLIDATION_DRY_RUN = True  # Analyze but don't write (flip to False after tuning)
@@ -143,16 +154,22 @@ CONSOLIDATION_DRY_RUN = True  # Analyze but don't write (flip to False after tun
 CONSOLIDATION_RECENT_LIMIT = 50    # How many recent memories to review
 CONSOLIDATION_COLD_SAMPLE = 50     # How many older memories to sample randomly
 
-# Output limits per run
-CONSOLIDATION_MAX_NEW_PATTERNS = 5  # Cap pattern creation per run
+# Output limits per run - HARD CAP, enforced in _apply_changes()
+# Keep this small to ensure changes are reviewable and predictable
+CONSOLIDATION_MAX_NEW_PATTERNS = 5
 
 # Model for consolidation analysis
 CONSOLIDATION_MODEL = "gpt-4.1-mini"
 
 # Scheduling (advisory; actual scheduling is external via cron/script)
+# The library does NOT auto-schedule - you must call run_once() externally
 CONSOLIDATION_FREQUENCY = "daily"  # "hourly" | "daily" | "manual"
 
-# Objectives passed to LLM (explicit, designer-defined, not self-generated)
+# Objectives passed to LLM (explicit, designer-defined, NOT self-generated)
+# The consolidator prompt inlines these and explicitly instructs:
+# - Do NOT invent new goals beyond these
+# - Do NOT auto-resolve contradictions
+# - Keep changes small and explainable
 CONSOLIDATION_OBJECTIVES = [
     "reduce redundancy in stored memories",
     "promote stable preferences and principles that help future interactions",

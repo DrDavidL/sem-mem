@@ -165,6 +165,17 @@ chat.remember("Patient prefers morning appointments")
 * **FastAPI Server:** RESTful API for programmatic access and microservice deployment.
 * **Docker Support:** Containerized deployment with docker-compose.
 
+### Recent Improvements
+
+These changes make Sem-Mem more inspectable, trustworthy, and production-friendly:
+
+* **Structured progress logging** - Each consolidation run records what changed and why in `progress_log.jsonl`, making memory evolution auditable. Access via `GET /progress`.
+* **Project manifests & progress summaries** - `save_project_manifest()` and `append_thread_progress()` store per-project state and session notes for easy re-entry into complex work.
+* **Smarter status queries** - Queries like "what's the status?" preferentially surface manifests and progress logs instead of raw history.
+* **Explicit conflict handling** - Corrections are stored separately (not overwrites), displayed last with `[CORRECTION]` prefix, and biased by recency/utility.
+* **Contradiction surfacing** - Detected contradictions are logged to `contradictions.json` with memory IDs for human review—never auto-resolved.
+* **Bounded consolidation** - Consolidation is explicitly offline, externally scheduled, and limited to `CONSOLIDATION_MAX_NEW_PATTERNS` per run.
+
 ## Installation
 
 ### From Source (Development)
@@ -470,6 +481,7 @@ When running the FastAPI server:
 | `/upload/pdf` | POST | Ingest PDF document |
 | `/threads/save` | POST | Save conversation to L2 |
 | `/consolidate` | POST | Run memory consolidation pass |
+| `/progress` | GET | Get recent progress log entries (filter by component) |
 
 API documentation available at `http://localhost:8000/docs` when server is running.
 
@@ -594,6 +606,8 @@ print(f"Re-embedded {stats['re_embedded']} memories")
 │   ├── thread_utils.py      # Thread utilities (title, summarization, analysis)
 │   ├── backup.py            # MemoryBackup class for backup/restore
 │   ├── thread_storage.py    # ThreadStorage for persistent threads
+│   ├── consolidation.py     # Memory consolidation worker
+│   ├── progress.py          # Progress logging for background processes
 │   └── api/
 │       ├── backup.py        # FastAPI backup & threads endpoints
 │       └── files.py         # File upload endpoints
@@ -604,6 +618,8 @@ print(f"Re-embedded {stats['re_embedded']} memories")
 │   ├── lexical_index.json   # Lexical search index
 │   ├── instructions.txt     # Persistent instructions
 │   ├── threads.json         # Persisted conversation threads
+│   ├── progress_log.jsonl   # Progress log for background processes
+│   ├── contradictions.json  # Flagged contradictions for review
 │   └── backups/             # Backup files
 ├── app.py                   # Streamlit standalone app
 ├── app_api.py               # Streamlit API client app
