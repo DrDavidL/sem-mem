@@ -6,11 +6,13 @@ Provides a whitelist-based file access system that:
 - Expands directory entries to their contained files
 - Validates file access requests against the whitelist
 - Supports text files, PDFs, and Word documents
+- Provides an agentic file_read tool for LLM tool calling
 """
 
 import os
 from pathlib import Path
-from typing import Set, List, Dict, Optional
+from typing import Set, List, Dict, Optional, Any, Tuple
+from dataclasses import dataclass
 
 # Base directory is the repo root (parent of sem_mem/)
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -381,3 +383,187 @@ def get_suggested_paths() -> List[str]:
             suggestions.append(filename)
 
     return suggestions
+
+
+# =============================================================================
+# Agentic File Read Tool (LLM Tool Calling)
+# =============================================================================
+
+@dataclass
+class FileReadResult:
+    """Result from reading a file."""
+    path: str
+    content: str
+    content_type: str
+    size: int
+    success: bool
+    error: Optional[str] = None
+
+
+def fetch_file(path: str, allowed_files: Optional[Set[str]] = None, max_chars: int = 50000) -> FileReadResult:
+    """
+    Read a whitelisted file and return its content.
+
+    This is the agentic interface for file reading - the LLM can request
+    specific files and receive their content.
+
+    Args:
+        path: Relative path to the file (e.g., "sem_mem/core.py")
+        allowed_files: Pre-loaded whitelist, or None to load fresh
+        max_chars: Maximum characters to return (truncates if exceeded)
+
+    Returns:
+        FileReadResult with content or error
+    """
+    try:
+        # Validate access
+        full_path = validate_file_access(path, allowed_files)
+
+        # Read content
+        content, media_type = read_file_content(full_path)
+
+        # Handle binary content (PDF, Word docs)
+        if isinstance(content, bytes):
+            # For PDFs, try to extract text
+            if media_type == "application/pdf":
+                try:
+                    from pypdf import PdfReader
+                    import io
+                    reader = PdfReader(io.BytesIO(content))
+                    text_parts = []
+                    for page in reader.pages:
+                        text = page.extract_text()
+                        if text:
+                            text_parts.append(text)
+                    content = "\n\n".join(text_parts)
+                    content_type = "pdf (extracted text)"
+                except Exception as e:
+                    return FileReadResult(
+                        path=path,
+                        content="",
+                        content_type="pdf",
+                        size=len(content),
+                        success=False,
+                        error=f"Could not extract PDF text: {e}",
+                    )
+            else:
+                # Word docs or other binary - not yet supported for text extraction
+                return FileReadResult(
+                    path=path,
+                    content="",
+                    content_type=media_type,
+                    size=len(content),
+                    success=False,
+                    error=f"Binary file type not supported for text extraction: {media_type}",
+                )
+        else:
+            content_type = "text"
+
+        # Truncate if too long
+        original_size = len(content)
+        if len(content) > max_chars:
+            content = content[:max_chars] + f"\n\n[Content truncated - {original_size} total chars]"
+
+        return FileReadResult(
+            path=path,
+            content=content,
+            content_type=content_type,
+            size=original_size,
+            success=True,
+        )
+
+    except FileNotFoundError as e:
+        return FileReadResult(
+            path=path,
+            content="",
+            content_type="",
+            size=0,
+            success=False,
+            error=f"File not found: {path}",
+        )
+    except PermissionError as e:
+        return FileReadResult(
+            path=path,
+            content="",
+            content_type="",
+            size=0,
+            success=False,
+            error=str(e),
+        )
+    except Exception as e:
+        return FileReadResult(
+            path=path,
+            content="",
+            content_type="",
+            size=0,
+            success=False,
+            error=f"Error reading file: {e}",
+        )
+
+
+def format_file_read_result(result: FileReadResult) -> str:
+    """
+    Format a file read result as context for the LLM.
+
+    Args:
+        result: FileReadResult from fetch_file()
+
+    Returns:
+        Formatted string for injection into prompt context
+    """
+    if not result.success:
+        return f"Failed to read {result.path}: {result.error}"
+
+    return f"""Content of {result.path} ({result.content_type}, {result.size} chars):
+
+{result.content}"""
+
+
+def get_file_read_tool_definition(api_format: str = "responses") -> Dict[str, Any]:
+    """
+    Get the OpenAI function tool definition for file_read.
+
+    This allows the LLM to proactively request file content from whitelisted files.
+
+    Args:
+        api_format: Either "responses" (OpenAI Responses API) or "completions" (Chat Completions).
+
+    Returns:
+        Tool definition dict for the specified API format.
+    """
+    description = (
+        "Read the content of a whitelisted local file. Use this when you need to see "
+        "the actual content of a file in the codebase. You can only read files that "
+        "have been added to the whitelist. The path should be relative to the repository root "
+        "(e.g., 'sem_mem/core.py' or 'README.md')."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "The relative path to the file (e.g., 'sem_mem/core.py', 'app.py')",
+            },
+        },
+        "required": ["path"],
+    }
+
+    if api_format == "responses":
+        # OpenAI Responses API format (flat structure)
+        return {
+            "type": "function",
+            "name": "file_read",
+            "description": description,
+            "parameters": parameters,
+            "strict": False,
+        }
+    else:
+        # Chat Completions API format (nested under "function")
+        return {
+            "type": "function",
+            "function": {
+                "name": "file_read",
+                "description": description,
+                "parameters": parameters,
+            },
+        }

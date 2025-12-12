@@ -793,3 +793,54 @@ def format_fetch_result_for_context(result: WebFetchResult, max_chars: int = 500
 Title: {result.title}
 
 {content}"""
+
+
+def get_web_fetch_tool_definition(api_format: str = "responses") -> Dict[str, Any]:
+    """
+    Get the OpenAI function tool definition for web_fetch.
+
+    This allows the LLM to proactively request URL content when needed.
+
+    Args:
+        api_format: Either "responses" (OpenAI Responses API) or "completions" (Chat Completions).
+                   The Responses API uses a flat structure while Chat Completions nests under "function".
+
+    Returns:
+        Tool definition dict for the specified API format.
+    """
+    description = (
+        "Fetch and extract content from a URL. Use this when you need to retrieve "
+        "the actual content of a webpage to answer a question. This is useful for "
+        "getting current data like stock prices, weather, news articles, documentation, "
+        "or any other web content. The URL should be a complete http/https URL."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "The complete URL to fetch (must start with http:// or https://)",
+            },
+        },
+        "required": ["url"],
+    }
+
+    if api_format == "responses":
+        # OpenAI Responses API format (flat structure)
+        return {
+            "type": "function",
+            "name": "web_fetch",
+            "description": description,
+            "parameters": parameters,
+            "strict": False,
+        }
+    else:
+        # Chat Completions API format (nested under "function")
+        return {
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "description": description,
+                "parameters": parameters,
+            },
+        }

@@ -40,6 +40,19 @@ from .web_search import (
     format_search_results_for_context,
     WebFetcher,
     format_fetch_result_for_context,
+    get_web_fetch_tool_definition,
+)
+from .file_access import (
+    fetch_file,
+    format_file_read_result,
+    get_file_read_tool_definition,
+    load_whitelist,
+)
+from .stock_tools import (
+    fetch_stock_price,
+    format_stock_price_result,
+    get_stock_price_tool_definition,
+    get_polygon_api_key,
 )
 
 if TYPE_CHECKING:
@@ -1207,9 +1220,11 @@ class SemanticMemory:
                 kwargs["tools"] = [{"type": "web_search_preview"}]
                 logs.append("🌐 OpenAI web search enabled")
 
-        # Web fetch: extract content from URLs in the query
+        # Web fetch: extract content from URLs in the query (passive mode)
+        # Also add web_fetch as a callable tool if enabled (active/agentic mode)
         web_fetch_context = ""
         if use_web_fetch:
+            # Passive: extract and fetch URLs from the query
             urls = self._extract_urls(user_query)
             if urls:
                 fetched_contents = []
@@ -1222,6 +1237,33 @@ class SemanticMemory:
                         logs.append(f"⚠️ Fetch failed: {url}")
                 if fetched_contents:
                     web_fetch_context = "\n\n---\n\n".join(fetched_contents)
+
+            # Active: add web_fetch as a callable tool for the LLM
+            # Only for providers that support tools (OpenAI)
+            if self._chat_provider.supports_responses_api:
+                if "tools" not in kwargs:
+                    kwargs["tools"] = []
+                kwargs["tools"].append(get_web_fetch_tool_definition())
+                logs.append("🔧 Web fetch tool enabled")
+
+        # File access: add file_read as a callable tool when file access is enabled
+        # This allows the LLM to proactively read whitelisted files
+        if self.include_file_access and self._chat_provider.supports_responses_api:
+            allowed_files = load_whitelist()
+            if allowed_files:
+                if "tools" not in kwargs:
+                    kwargs["tools"] = []
+                kwargs["tools"].append(get_file_read_tool_definition())
+                logs.append(f"📂 File read tool enabled ({len(allowed_files)} files)")
+                # Store for use in tool loop
+                self._allowed_files_cache = allowed_files
+
+        # Stock price: add stock_price tool if Polygon API key is configured
+        if self._chat_provider.supports_responses_api and get_polygon_api_key():
+            if "tools" not in kwargs:
+                kwargs["tools"] = []
+            kwargs["tools"].append(get_stock_price_tool_definition())
+            logs.append("📈 Stock price tool enabled")
 
         # Reasoning models require special handling
         if self._is_reasoning_model(use_model):
@@ -1251,6 +1293,109 @@ class SemanticMemory:
             use_responses_api=True,  # Prefer Responses API when available
             **kwargs,
         )
+
+        # Handle tool calls (agentic loop)
+        # The model may request tool calls (e.g., web_fetch) which we execute
+        # and then feed results back to get a final response
+        max_tool_iterations = 3  # Prevent infinite loops
+        iteration = 0
+
+        while response.tool_calls and iteration < max_tool_iterations:
+            iteration += 1
+            tool_results = []
+
+            for tool_call in response.tool_calls:
+                if tool_call.name == "web_fetch":
+                    url = tool_call.arguments.get("url", "")
+                    logs.append(f"🔧 Tool call: web_fetch({url})")
+
+                    content, success = self.fetch_url(url)
+                    if success:
+                        logs.append(f"📥 Fetched: {url}")
+                        tool_results.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.id,
+                            "output": content,
+                        })
+                    else:
+                        logs.append(f"⚠️ Fetch failed: {url}")
+                        tool_results.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.id,
+                            "output": f"Failed to fetch URL: {content}",
+                        })
+
+                elif tool_call.name == "file_read":
+                    file_path = tool_call.arguments.get("path", "")
+                    logs.append(f"🔧 Tool call: file_read({file_path})")
+
+                    # Use cached whitelist if available
+                    allowed = getattr(self, "_allowed_files_cache", None)
+                    result = fetch_file(file_path, allowed_files=allowed)
+                    formatted = format_file_read_result(result)
+
+                    if result.success:
+                        logs.append(f"📄 Read: {file_path} ({result.size} chars)")
+                        tool_results.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.id,
+                            "output": formatted,
+                        })
+                    else:
+                        logs.append(f"⚠️ Read failed: {file_path} - {result.error}")
+                        tool_results.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.id,
+                            "output": formatted,
+                        })
+
+                elif tool_call.name == "stock_price":
+                    ticker = tool_call.arguments.get("ticker", "")
+                    logs.append(f"🔧 Tool call: stock_price({ticker})")
+
+                    result = fetch_stock_price(ticker)
+                    formatted = format_stock_price_result(result)
+
+                    if result.success:
+                        logs.append(f"📈 Stock: {ticker} @ ${result.price:.2f}")
+                        tool_results.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.id,
+                            "output": formatted,
+                        })
+                    else:
+                        logs.append(f"⚠️ Stock lookup failed: {ticker} - {result.error}")
+                        tool_results.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.id,
+                            "output": formatted,
+                        })
+
+                else:
+                    # Unknown tool - return error
+                    logs.append(f"⚠️ Unknown tool: {tool_call.name}")
+                    tool_results.append({
+                        "type": "function_call_output",
+                        "call_id": tool_call.id,
+                        "output": f"Error: Unknown tool '{tool_call.name}'",
+                    })
+
+            # Submit tool results and get next response
+            if tool_results and hasattr(self._chat_provider, "submit_tool_results"):
+                response = self._chat_provider.submit_tool_results(
+                    previous_response_id=response.response_id,
+                    tool_results=tool_results,
+                    model=use_model,
+                    instructions=full_instructions,
+                    tools=kwargs.get("tools"),  # Pass tools for potential follow-up calls
+                    **{k: v for k, v in kwargs.items() if k != "tools"},
+                )
+            else:
+                # Provider doesn't support tool results - break the loop
+                break
+
+        if iteration >= max_tool_iterations and response.tool_calls:
+            logs.append(f"⚠️ Tool loop limit reached ({max_tool_iterations} iterations)")
 
         response_text = response.text
         response_id = response.response_id

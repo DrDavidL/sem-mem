@@ -13,6 +13,20 @@ import numpy as np
 
 
 @dataclass
+class ToolCall:
+    """A tool call requested by the model."""
+
+    id: str
+    """Unique identifier for this tool call."""
+
+    name: str
+    """Name of the tool to call."""
+
+    arguments: Dict[str, Any]
+    """Arguments to pass to the tool."""
+
+
+@dataclass
 class ChatResponse:
     """Unified response format across all chat providers."""
 
@@ -24,6 +38,9 @@ class ChatResponse:
 
     raw_response: Any = None
     """Original provider response for debugging/advanced use."""
+
+    tool_calls: Optional[List[ToolCall]] = None
+    """Tool calls requested by the model (if any)."""
 
 
 @dataclass

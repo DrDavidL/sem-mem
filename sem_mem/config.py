@@ -33,6 +33,7 @@ PROVIDER_API_KEY_ENV_VARS = {
     "google": "GOOGLE_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "ollama": None,  # Ollama doesn't require an API key
+    "polygon": "POLYGON_API_KEY",  # Stock market data
 }
 
 # =============================================================================

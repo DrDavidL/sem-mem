@@ -109,18 +109,97 @@ Search the web for real-time information. Supports multiple backends (priority o
 3. **Google PSE** - Programmable Search Engine (set `GOOGLE_PSE_API_KEY` + `GOOGLE_PSE_ENGINE_ID`)
 4. **OpenAI** - Fallback using `web_search_preview` tool
 
-### Web Fetch
-Fetch and extract content from URLs mentioned in messages. When enabled:
+### Web Fetch (Agentic)
+Fetch and extract content from URLs. Works in two modes:
+
+**Passive Mode** (context injection):
 - Automatically detects URLs in user messages
 - Fetches up to 3 URLs per message
+- Content injected into context before LLM call
+
+**Active/Agentic Mode** (tool calling):
+- LLM can proactively request URL fetches when needed
+- Useful for real-time data: stock prices, weather, news, documentation
+- Uses OpenAI Responses API tool calling with automatic result feeding
+- Up to 3 tool call iterations to prevent infinite loops
+
+**Features:**
 - Extracts main content from HTML (removes nav, headers, scripts)
 - Supports HTML, plain text, and JSON content types
 - Security: blocks localhost, private IPs, configurable domain lists
 
-### File Access
-Allow the agent to see whitelisted local files. Configure which files are accessible via:
+**Example flow (agentic):**
+1. User asks: "What's NVDA's current stock price?"
+2. LLM requests `web_fetch(url="https://finance.yahoo.com/quote/NVDA/")`
+3. System fetches URL, extracts content
+4. LLM receives content and provides answer with actual price
+
+### File Access (Agentic)
+Read whitelisted local files. Works in two modes:
+
+**Passive Mode** (context injection):
+- Tells the AI which files are available in the whitelist
+- File list included in system context
+
+**Active/Agentic Mode** (tool calling):
+- LLM can proactively request file content when needed
+- Only files in the whitelist can be read
+- Uses OpenAI Responses API tool calling with automatic result feeding
+- Supports text files and PDFs (with text extraction)
+
+**Configuration:**
 - Sidebar "📂 Sema File Access" section
 - `sema_files.txt` whitelist file (paths relative to repo root)
+- Can whitelist individual files or entire directories
+
+**Example flow (agentic):**
+1. User asks: "What does the core.py file do?"
+2. LLM requests `file_read(path="sem_mem/core.py")`
+3. System reads file content (if whitelisted)
+4. LLM receives content and provides explanation
+
+**Security:**
+- Only whitelisted files can be read
+- Path traversal attacks are blocked
+- Binary files (except PDF) are rejected
+
+### Stock Price (Agentic)
+Get real-time stock prices and market data using Polygon.io API.
+
+**Automatic enablement:**
+- Automatically enabled when `POLYGON_API_KEY` is set in `.env`
+- No UI toggle needed - the tool appears when API key is configured
+
+**Configuration:**
+Add to your `.env` file:
+```
+POLYGON_API_KEY=your_polygon_api_key_here
+```
+
+**Data returned:**
+- Current/latest trade price
+- Daily change (amount and percentage)
+- Open, high, low prices
+- Previous close
+- Trading volume
+- Timestamp
+
+**Example flow:**
+1. User asks: "What's Apple's stock price?"
+2. LLM requests `stock_price(ticker="AAPL")`
+3. System fetches data from Polygon.io API
+4. LLM receives: price, change, OHLC, volume
+5. LLM provides formatted response
+
+**Supported tickers:**
+- All major US stock exchanges (NYSE, NASDAQ, etc.)
+- Case-insensitive ticker lookup
+- Examples: AAPL, MSFT, GOOGL, NVDA, TSLA, AMZN
+
+**API limits:**
+- Free tier: 5 requests/minute, end-of-day data
+- Paid tiers: Real-time data, higher rate limits
+- See: https://polygon.io/pricing
 
 ## Development
 

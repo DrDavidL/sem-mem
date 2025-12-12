@@ -31,6 +31,19 @@ from .web_search import (
     format_search_results_for_context,
     WebFetcher,
     format_fetch_result_for_context,
+    get_web_fetch_tool_definition,
+)
+from .file_access import (
+    fetch_file,
+    format_file_read_result,
+    get_file_read_tool_definition,
+    load_whitelist,
+)
+from .stock_tools import (
+    fetch_stock_price,
+    format_stock_price_result,
+    get_stock_price_tool_definition,
+    get_polygon_api_key,
 )
 
 
@@ -641,8 +654,10 @@ class AsyncSemanticMemory:
                 create_params["tools"] = [{"type": "web_search_preview"}]
                 logs.append("🌐 OpenAI web search enabled")
 
-        # Web fetch: extract content from URLs in the query
+        # Web fetch: extract content from URLs in the query (passive mode)
+        # Also add web_fetch as a callable tool if enabled (active/agentic mode)
         if use_web_fetch:
+            # Passive: extract and fetch URLs from the query
             urls = self._extract_urls(user_query)
             if urls:
                 fetched_contents = []
@@ -657,6 +672,30 @@ class AsyncSemanticMemory:
                     web_fetch_context = "\n\n---\n\n".join(fetched_contents)
                     create_params["input"] = f"Fetched URL content:\n{web_fetch_context}\n\n{create_params['input']}"
 
+            # Active: add web_fetch as a callable tool for the LLM
+            if "tools" not in create_params:
+                create_params["tools"] = []
+            create_params["tools"].append(get_web_fetch_tool_definition())
+            logs.append("🔧 Web fetch tool enabled")
+
+        # File access: add file_read as a callable tool when file access is enabled
+        if self.include_file_access:
+            allowed_files = load_whitelist()
+            if allowed_files:
+                if "tools" not in create_params:
+                    create_params["tools"] = []
+                create_params["tools"].append(get_file_read_tool_definition())
+                logs.append(f"📂 File read tool enabled ({len(allowed_files)} files)")
+                # Store for use in tool loop
+                self._allowed_files_cache = allowed_files
+
+        # Stock price: add stock_price tool if Polygon API key is configured
+        if get_polygon_api_key():
+            if "tools" not in create_params:
+                create_params["tools"] = []
+            create_params["tools"].append(get_stock_price_tool_definition())
+            logs.append("📈 Stock price tool enabled")
+
         # Reasoning models (gpt-5.1, o1, o3) require special handling
         if use_model in ("gpt-5.1", "o1", "o3"):
             create_params["reasoning"] = {"effort": use_reasoning}
@@ -664,6 +703,136 @@ class AsyncSemanticMemory:
             create_params["temperature"] = 0.7
 
         response = await self.client.responses.create(**create_params)  # type: ignore
+
+        # Handle tool calls (agentic loop)
+        # The model may request tool calls (e.g., web_fetch, file_read) which we execute
+        # and then feed results back to get a final response
+        max_tool_iterations = 3  # Prevent infinite loops
+        iteration = 0
+
+        while hasattr(response, 'output') and response.output and iteration < max_tool_iterations:
+            # Check for function calls in the output
+            tool_calls = []
+            for item in response.output:
+                if hasattr(item, 'type') and item.type == 'function_call':
+                    tool_calls.append(item)
+
+            if not tool_calls:
+                break
+
+            iteration += 1
+            tool_results = []
+
+            for tool_call in tool_calls:
+                if tool_call.name == "web_fetch":
+                    import json
+                    try:
+                        args = json.loads(tool_call.arguments) if isinstance(tool_call.arguments, str) else tool_call.arguments
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                    url = args.get("url", "")
+                    logs.append(f"🔧 Tool call: web_fetch({url})")
+
+                    content, success = self.fetch_url(url)
+                    if success:
+                        logs.append(f"📥 Fetched: {url}")
+                        tool_results.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.call_id,
+                            "output": content,
+                        })
+                    else:
+                        logs.append(f"⚠️ Fetch failed: {url}")
+                        tool_results.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.call_id,
+                            "output": f"Failed to fetch URL: {content}",
+                        })
+
+                elif tool_call.name == "file_read":
+                    import json
+                    try:
+                        args = json.loads(tool_call.arguments) if isinstance(tool_call.arguments, str) else tool_call.arguments
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                    file_path = args.get("path", "")
+                    logs.append(f"🔧 Tool call: file_read({file_path})")
+
+                    # Use cached whitelist if available
+                    allowed = getattr(self, "_allowed_files_cache", None)
+                    result = fetch_file(file_path, allowed_files=allowed)
+                    formatted = format_file_read_result(result)
+
+                    if result.success:
+                        logs.append(f"📄 Read: {file_path} ({result.size} chars)")
+                        tool_results.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.call_id,
+                            "output": formatted,
+                        })
+                    else:
+                        logs.append(f"⚠️ Read failed: {file_path} - {result.error}")
+                        tool_results.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.call_id,
+                            "output": formatted,
+                        })
+
+                elif tool_call.name == "stock_price":
+                    import json
+                    try:
+                        args = json.loads(tool_call.arguments) if isinstance(tool_call.arguments, str) else tool_call.arguments
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                    ticker = args.get("ticker", "")
+                    logs.append(f"🔧 Tool call: stock_price({ticker})")
+
+                    result = fetch_stock_price(ticker)
+                    formatted = format_stock_price_result(result)
+
+                    if result.success:
+                        logs.append(f"📈 Stock: {ticker} @ ${result.price:.2f}")
+                        tool_results.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.call_id,
+                            "output": formatted,
+                        })
+                    else:
+                        logs.append(f"⚠️ Stock lookup failed: {ticker} - {result.error}")
+                        tool_results.append({
+                            "type": "function_call_output",
+                            "call_id": tool_call.call_id,
+                            "output": formatted,
+                        })
+
+                else:
+                    # Unknown tool - return error
+                    logs.append(f"⚠️ Unknown tool: {tool_call.name}")
+                    tool_results.append({
+                        "type": "function_call_output",
+                        "call_id": tool_call.call_id,
+                        "output": f"Error: Unknown tool '{tool_call.name}'",
+                    })
+
+            # Submit tool results and get next response
+            if tool_results:
+                submit_params = {
+                    "model": use_model,
+                    "previous_response_id": response.id,
+                    "input": tool_results,
+                }
+                if "tools" in create_params:
+                    submit_params["tools"] = create_params["tools"]
+                if use_model in ("gpt-5.1", "o1", "o3"):
+                    submit_params["reasoning"] = {"effort": use_reasoning}
+                else:
+                    submit_params["temperature"] = 0.7
+
+                response = await self.client.responses.create(**submit_params)
+
+        if iteration >= max_tool_iterations:
+            logs.append(f"⚠️ Tool loop limit reached ({max_tool_iterations} iterations)")
+
         response_text = response.output_text
 
         # Auto-memory: evaluate and store salient exchanges

@@ -18,6 +18,7 @@ from .base import (
     BaseEmbeddingProvider,
     ChatResponse,
     EmbeddingResponse,
+    ToolCall,
 )
 
 
@@ -184,10 +185,106 @@ class OpenAIChatProvider(BaseChatProvider):
 
         response = self._client.responses.create(**params)
 
+        # Check for tool calls in the response output
+        tool_calls = None
+        if hasattr(response, "output") and response.output:
+            parsed_tool_calls = []
+            for item in response.output:
+                if hasattr(item, "type") and item.type == "function_call":
+                    import json
+                    try:
+                        args = json.loads(item.arguments) if isinstance(item.arguments, str) else item.arguments
+                    except (json.JSONDecodeError, TypeError):
+                        args = {"raw": item.arguments}
+                    parsed_tool_calls.append(ToolCall(
+                        id=item.call_id,
+                        name=item.name,
+                        arguments=args,
+                    ))
+            if parsed_tool_calls:
+                tool_calls = parsed_tool_calls
+
         return ChatResponse(
-            text=response.output_text,
+            text=response.output_text or "",
             response_id=response.id,
             raw_response=response,
+            tool_calls=tool_calls,
+        )
+
+    def submit_tool_results(
+        self,
+        previous_response_id: str,
+        tool_results: List[Dict[str, Any]],
+        model: str,
+        instructions: Optional[str] = None,
+        **kwargs,
+    ) -> ChatResponse:
+        """
+        Submit tool results to continue a conversation after tool calls.
+
+        This is used when the model requests tool calls and we need to
+        provide the results back to get a final response.
+
+        Args:
+            previous_response_id: The response ID from the tool-calling response.
+            tool_results: List of dicts with 'call_id' and 'output' keys.
+            model: Model name.
+            instructions: System instructions.
+            **kwargs: Additional parameters.
+
+        Returns:
+            ChatResponse with the model's final response.
+        """
+        params: Dict[str, Any] = {
+            "model": model,
+            "previous_response_id": previous_response_id,
+            "input": tool_results,  # Tool results as input
+        }
+
+        if instructions:
+            params["instructions"] = instructions
+
+        # Pass through tools in case model needs another round
+        tools = kwargs.pop("tools", None)
+        if tools:
+            params["tools"] = tools
+
+        # Handle reasoning models
+        reasoning_effort = kwargs.pop("reasoning_effort", None)
+        if self.is_reasoning_model(model):
+            if reasoning_effort:
+                params["reasoning"] = {"effort": reasoning_effort}
+        else:
+            temperature = kwargs.pop("temperature", None)
+            if temperature is not None:
+                params["temperature"] = temperature
+
+        response = self._client.responses.create(**params)
+
+        # Check for additional tool calls
+        tool_calls = None
+        if hasattr(response, "output") and response.output:
+            import json
+            parsed_tool_calls = []
+            for item in response.output:
+                if hasattr(item, "type") and item.type == "function_call":
+                    try:
+                        args = json.loads(item.arguments) if isinstance(item.arguments, str) else item.arguments
+                    except (json.JSONDecodeError, TypeError):
+                        args = {"raw": item.arguments}
+                    parsed_tool_calls.append(ToolCall(
+                        id=item.call_id,
+                        name=item.name,
+                        arguments=args,
+                    ))
+            if parsed_tool_calls:
+                tool_calls = parsed_tool_calls
+
+        return ChatResponse(
+            text=response.output_text or "",
+            response_id=response.id,
+            raw_response=response,
+            tool_calls=tool_calls,
         )
 
     def _chat_completions_api(

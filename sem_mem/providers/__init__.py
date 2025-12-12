@@ -12,7 +12,7 @@ Provider Tiers:
 
 from typing import Optional, Dict, Type, Set
 
-from .base import BaseChatProvider, BaseEmbeddingProvider, ChatResponse, EmbeddingResponse
+from .base import BaseChatProvider, BaseEmbeddingProvider, ChatResponse, EmbeddingResponse, ToolCall
 from ..exceptions import ProviderNotFoundError, ProviderConfigError
 
 
@@ -196,6 +196,7 @@ __all__ = [
     "BaseEmbeddingProvider",
     "ChatResponse",
     "EmbeddingResponse",
+    "ToolCall",
     # Factory functions
     "get_chat_provider",
     "get_embedding_provider",

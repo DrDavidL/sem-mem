@@ -563,9 +563,11 @@ with st.sidebar:
 
     # Web Fetch Toggle
     web_fetch_enabled = st.toggle(
-        "📥 Web Fetch",
+        "📥 Web Fetch (Agentic)",
         value=st.session_state.get("web_fetch", False),
-        help="Fetch and extract content from URLs in your messages"
+        help="Allow the AI to fetch URL content when needed. Works in two modes: "
+             "(1) Passive: auto-fetches URLs you include in messages, "
+             "(2) Active: AI can proactively fetch URLs to answer questions (e.g., stock prices, news)"
     )
     if web_fetch_enabled != st.session_state.get("web_fetch", False):
         st.session_state.web_fetch = web_fetch_enabled
@@ -573,9 +575,12 @@ with st.sidebar:
 
     # File Access Toggle
     file_access_enabled = st.toggle(
-        "📂 File Access",
+        "📂 File Access (Agentic)",
         value=st.session_state.get("file_access", False),
-        help="Allow reading whitelisted local files (configure in Sema File Access below)"
+        help="Allow the AI to read whitelisted local files. Works in two modes: "
+             "(1) Passive: tells AI which files exist, "
+             "(2) Active: AI can proactively read file contents when needed. "
+             "Configure whitelist in Sema File Access section below."
     )
     if file_access_enabled != st.session_state.get("file_access", False):
         st.session_state.file_access = file_access_enabled
