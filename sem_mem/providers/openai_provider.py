@@ -6,12 +6,16 @@ This is the reference ("golden path") implementation that supports:
 - Chat Completions API for utility calls
 - Embeddings API for vector generation
 - Special handling for reasoning models (gpt-5.1, o1, o3)
+- Automatic retry with exponential backoff for rate limits
 """
 
-from typing import List, Dict, Optional, Any
+import logging
+import time
+from typing import List, Dict, Optional, Any, Callable, TypeVar
+
 import numpy as np
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError, APIError, APIConnectionError, APITimeoutError
 
 from .base import (
     BaseChatProvider,
@@ -20,6 +24,82 @@ from .base import (
     EmbeddingResponse,
     ToolCall,
 )
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+def retry_with_backoff(
+    func: Callable[[], T],
+    max_retries: int = 3,
+    initial_delay: float = 1.0,
+    max_delay: float = 60.0,
+    backoff_factor: float = 2.0,
+    retryable_errors: tuple = (RateLimitError, APIConnectionError, APITimeoutError),
+) -> T:
+    """
+    Execute a function with exponential backoff retry on specific errors.
+
+    Args:
+        func: Function to execute
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay in seconds before first retry
+        max_delay: Maximum delay between retries
+        backoff_factor: Multiplier for delay after each retry
+        retryable_errors: Tuple of exception types to retry on
+
+    Returns:
+        Result of the function call
+
+    Raises:
+        The last exception if all retries are exhausted
+    """
+    delay = initial_delay
+    last_exception = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            return func()
+        except retryable_errors as e:
+            last_exception = e
+            if attempt == max_retries:
+                logger.error(f"All {max_retries + 1} attempts failed: {e}")
+                raise
+
+            # Check for specific rate limit info in the error
+            retry_after = None
+            if hasattr(e, "response") and e.response is not None:
+                retry_after = e.response.headers.get("retry-after")
+                if retry_after:
+                    try:
+                        delay = min(float(retry_after), max_delay)
+                    except ValueError:
+                        pass
+
+            logger.warning(
+                f"Attempt {attempt + 1}/{max_retries + 1} failed with {type(e).__name__}: {e}. "
+                f"Retrying in {delay:.1f}s..."
+            )
+            time.sleep(delay)
+            delay = min(delay * backoff_factor, max_delay)
+        except APIError as e:
+            # For other API errors, check if it's a server error (5xx) worth retrying
+            if hasattr(e, "status_code") and e.status_code and 500 <= e.status_code < 600:
+                last_exception = e
+                if attempt == max_retries:
+                    logger.error(f"All {max_retries + 1} attempts failed: {e}")
+                    raise
+                logger.warning(
+                    f"Attempt {attempt + 1}/{max_retries + 1} failed with server error: {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                time.sleep(delay)
+                delay = min(delay * backoff_factor, max_delay)
+            else:
+                raise
+
+    raise last_exception
 
 
 # Embedding model dimensions (single source of truth)
@@ -183,7 +263,10 @@ class OpenAIChatProvider(BaseChatProvider):
         if tools:
             params["tools"] = tools
 
-        response = self._client.responses.create(**params)
+        def _call():
+            return self._client.responses.create(**params)
+
+        response = retry_with_backoff(_call)
 
         # Check for tool calls in the response output
         tool_calls = None
@@ -259,7 +342,10 @@ class OpenAIChatProvider(BaseChatProvider):
             if temperature is not None:
                 params["temperature"] = temperature
 
-        response = self._client.responses.create(**params)
+        def _call():
+            return self._client.responses.create(**params)
+
+        response = retry_with_backoff(_call)
 
         # Check for additional tool calls
         tool_calls = None
@@ -329,7 +415,10 @@ class OpenAIChatProvider(BaseChatProvider):
         if response_format:
             params["response_format"] = response_format
 
-        response = self._client.chat.completions.create(**params)
+        def _call():
+            return self._client.chat.completions.create(**params)
+
+        response = retry_with_backoff(_call)
 
         return ChatResponse(
             text=response.choices[0].message.content or "",
@@ -386,11 +475,14 @@ class OpenAIEmbeddingProvider(BaseEmbeddingProvider):
         texts: List[str],
         model: Optional[str] = None,
     ) -> EmbeddingResponse:
-        """Generate embeddings for multiple texts."""
+        """Generate embeddings for multiple texts with retry on rate limits."""
         model = model or self.default_model
         dimension = self.model_dimension(model)
 
-        response = self._client.embeddings.create(input=texts, model=model)
+        def _call():
+            return self._client.embeddings.create(input=texts, model=model)
+
+        response = retry_with_backoff(_call)
 
         embeddings = [np.array(item.embedding) for item in response.data]
 
@@ -405,9 +497,13 @@ class OpenAIEmbeddingProvider(BaseEmbeddingProvider):
         text: str,
         model: Optional[str] = None,
     ) -> np.ndarray:
-        """Generate embedding for a single text."""
+        """Generate embedding for a single text with retry on rate limits."""
         model = model or self.default_model
-        response = self._client.embeddings.create(input=text, model=model)
+
+        def _call():
+            return self._client.embeddings.create(input=text, model=model)
+
+        response = retry_with_backoff(_call)
         return np.array(response.data[0].embedding)
 
 

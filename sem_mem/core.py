@@ -41,6 +41,8 @@ from .web_search import (
     WebFetcher,
     format_fetch_result_for_context,
     get_web_fetch_tool_definition,
+    SearchAndFetch,
+    should_use_playwright,
 )
 from .file_access import (
     fetch_file,
@@ -417,8 +419,14 @@ class SemanticMemory:
         # Web search manager (auto-detects Exa > Tavily > Google PSE > OpenAI)
         self._web_search = WebSearchManager()
 
-        # Web fetcher for URL content extraction
+        # Web fetcher for URL content extraction (uses Playwright if available)
         self._web_fetcher = WebFetcher()
+
+        # Combined search + fetch workflow (Playwright-based parallel fetching)
+        self._search_and_fetch = SearchAndFetch(
+            search_manager=self._web_search,
+            use_playwright=should_use_playwright(),
+        )
 
         # Segmented LRU cache for hot items (L1)
         self.local_cache = SmartCache(capacity=cache_size)
@@ -508,15 +516,87 @@ class SemanticMemory:
         """
         Fetch content from a URL.
 
+        Uses Playwright if available for better JavaScript rendering,
+        falls back to requests-based fetching.
+
         Args:
             url: URL to fetch
 
         Returns:
             Tuple of (formatted_content, success)
         """
-        result = self._web_fetcher.fetch(url)
-        formatted = format_fetch_result_for_context(result)
-        return formatted, result.success
+        # Use SearchAndFetch which handles Playwright vs requests fallback
+        results = self._search_and_fetch.fetch_urls([url])
+        if results:
+            result = results[0]
+            formatted = format_fetch_result_for_context(result)
+            return formatted, result.success
+        return "Failed to fetch URL", False
+
+    def fetch_urls(self, urls: List[str]) -> List[tuple[str, bool]]:
+        """
+        Fetch content from multiple URLs in parallel.
+
+        Uses Playwright for parallel fetching if available,
+        falls back to sequential requests-based fetching.
+
+        Args:
+            urls: List of URLs to fetch
+
+        Returns:
+            List of (formatted_content, success) tuples
+        """
+        results = self._search_and_fetch.fetch_urls(urls)
+        return [
+            (format_fetch_result_for_context(r), r.success)
+            for r in results
+        ]
+
+    def search_and_fetch(
+        self,
+        query: str,
+        num_results: int = 5,
+        fetch_full_content: bool = True,
+    ) -> tuple[str, List[str]]:
+        """
+        Search the web and fetch full content of results in parallel.
+
+        This is the recommended workflow for web research:
+        1. Search using Exa/Tavily/Google PSE
+        2. Fetch all result URLs in parallel using Playwright
+        3. Return formatted context for the LLM
+
+        Args:
+            query: Search query
+            num_results: Number of search results
+            fetch_full_content: Whether to fetch full page content
+
+        Returns:
+            Tuple of (formatted_context, logs)
+        """
+        logs = []
+        results = self._search_and_fetch.search_and_fetch(
+            query,
+            num_results=num_results,
+            fetch_results=fetch_full_content,
+        )
+
+        backend = results.get("backend")
+        search_response = results.get("search_response")
+        fetch_results = results.get("fetch_results", [])
+
+        if backend:
+            logs.append(f"🔍 Search via {backend}")
+        if search_response and search_response.results:
+            logs.append(f"📋 {len(search_response.results)} results found")
+        if fetch_results:
+            successful = sum(1 for r in fetch_results if r.success)
+            logs.append(f"📥 Fetched {successful}/{len(fetch_results)} pages")
+            if should_use_playwright():
+                logs.append("🎭 Using Playwright (parallel)")
+
+        context = self._search_and_fetch.format_for_context(results)
+        return context, logs
 
     def _extract_urls(self, text: str) -> List[str]:
         """Extract URLs from text."""
@@ -1264,12 +1344,13 @@ class SemanticMemory:
         # Also add web_fetch as a callable tool if enabled (active/agentic mode)
         web_fetch_context = ""
         if use_web_fetch:
-            # Passive: extract and fetch URLs from the query
+            # Passive: extract and fetch URLs from the query (parallel via Playwright)
             urls = self._extract_urls(user_query)
             if urls:
+                # Fetch all URLs in parallel (Playwright if available, else sequential)
+                fetch_results = self.fetch_urls(urls[:5])  # Limit to 5 URLs
                 fetched_contents = []
-                for url in urls[:3]:  # Limit to 3 URLs
-                    content, success = self.fetch_url(url)
+                for url, (content, success) in zip(urls[:5], fetch_results):
                     if success:
                         fetched_contents.append(content)
                         logs.append(f"📥 Fetched: {url}")
@@ -1277,6 +1358,8 @@ class SemanticMemory:
                         logs.append(f"⚠️ Fetch failed: {url}")
                 if fetched_contents:
                     web_fetch_context = "\n\n---\n\n".join(fetched_contents)
+                if should_use_playwright() and len(urls) > 1:
+                    logs.append("🎭 Parallel fetch via Playwright")
 
             # Active: add web_fetch as a callable tool for the LLM
             # Only for providers that support tools (OpenAI)

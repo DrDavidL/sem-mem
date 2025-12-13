@@ -125,12 +125,24 @@ Search the web for real-time information. Supports multiple backends (priority o
 3. **Google PSE** - Programmable Search Engine (set `GOOGLE_PSE_API_KEY` + `GOOGLE_PSE_ENGINE_ID`)
 4. **OpenAI** - Fallback using `web_search_preview` tool
 
-### Web Fetch (Agentic)
-Fetch and extract content from URLs. Works in two modes:
+### Web Fetch (Playwright-based)
+Fetch and extract content from URLs using Playwright for JavaScript rendering.
+
+**Playwright Benefits:**
+- **JavaScript rendering** - Handles SPAs and dynamic content
+- **Parallel fetching** - Fetches multiple URLs concurrently (up to 5 pages)
+- **Better content extraction** - Waits for content to load before extracting
+- **Automatic fallback** - Falls back to requests-based fetching if Playwright unavailable
+
+**Installation:**
+```bash
+pip install playwright
+playwright install chromium
+```
 
 **Passive Mode** (context injection):
 - Automatically detects URLs in user messages
-- Fetches up to 3 URLs per message
+- Fetches up to 5 URLs in parallel via Playwright
 - Content injected into context before LLM call
 
 **Active/Agentic Mode** (tool calling):
@@ -139,15 +151,45 @@ Fetch and extract content from URLs. Works in two modes:
 - Uses OpenAI Responses API tool calling with automatic result feeding
 - Up to 3 tool call iterations to prevent infinite loops
 
+**Search + Fetch Workflow:**
+The recommended pattern is to combine web search with parallel content fetching:
+1. Search via Exa/Tavily/Google PSE to get URLs
+2. Fetch all URLs in parallel via Playwright
+3. Inject full page content as context for the LLM
+
+```python
+from sem_mem import SemanticMemory
+
+memory = SemanticMemory(api_key="...", web_search=True, web_fetch=True)
+
+# Method 1: Combined search and fetch
+context, logs = memory.search_and_fetch("Python asyncio best practices", num_results=5)
+# Returns formatted context with search results + full page content
+
+# Method 2: Direct URL fetching (parallel)
+results = memory.fetch_urls(["https://example1.com", "https://example2.com"])
+for content, success in results:
+    if success:
+        print(content)
+```
+
 **Features:**
 - Extracts main content from HTML (removes nav, headers, scripts)
 - Supports HTML, plain text, and JSON content types
 - Security: blocks localhost, private IPs, configurable domain lists
+- Configurable concurrency (default: 5 parallel pages)
+- Configurable timeout (default: 30s per page)
+
+**Configuration:**
+```
+WEB_FETCH_USE_PLAYWRIGHT=true   # Use Playwright (default if installed)
+WEB_FETCH_USE_PLAYWRIGHT=false  # Force requests-based fetching
+```
 
 **Example flow (agentic):**
 1. User asks: "What's NVDA's current stock price?"
 2. LLM requests `web_fetch(url="https://finance.yahoo.com/quote/NVDA/")`
-3. System fetches URL, extracts content
+3. System fetches URL via Playwright, extracts content
 4. LLM receives content and provides answer with actual price
 
 ### File Access (Agentic)

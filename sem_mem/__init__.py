@@ -59,7 +59,29 @@ from .web_search import (
     SearchResult,
     SearchResponse,
     format_search_results_for_context,
+    SearchAndFetch,
+    search_and_fetch_urls,
+    should_use_playwright,
 )
+
+# Playwright-based fetching (optional)
+try:
+    from .playwright_fetch import (
+        PlaywrightFetcher,
+        PlaywrightFetchResult,
+        fetch_urls_parallel,
+        fetch_urls_sync,
+        format_playwright_result_for_context,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    _has_playwright = PLAYWRIGHT_AVAILABLE
+except ImportError:
+    PlaywrightFetcher = None
+    PlaywrightFetchResult = None
+    fetch_urls_parallel = None
+    fetch_urls_sync = None
+    format_playwright_result_for_context = None
+    _has_playwright = False
 from .exceptions import (
     SemMemError,
     EmbeddingMismatchError,
@@ -141,6 +163,15 @@ __all__ = [
     "SearchResult",
     "SearchResponse",
     "format_search_results_for_context",
+    "SearchAndFetch",
+    "search_and_fetch_urls",
+    "should_use_playwright",
+    # Playwright fetching (optional)
+    "PlaywrightFetcher",
+    "PlaywrightFetchResult",
+    "fetch_urls_parallel",
+    "fetch_urls_sync",
+    "format_playwright_result_for_context",
     # Exceptions
     "SemMemError",
     "EmbeddingMismatchError",

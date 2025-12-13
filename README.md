@@ -446,16 +446,89 @@ Change models via:
 
 ## Web Search
 
-Sem-Mem optionally integrates OpenAI's built-in web search tool for real-time information retrieval. **Web search is off by default.**
+Sem-Mem integrates multiple web search backends for real-time information retrieval. **Web search is off by default.**
 
-> **Clarification**: "Local storage" refers to your HNSW index and instructions file staying on your machine. When web search is enabled, queries are sent to OpenAI's web search API (in addition to the normal embedding/chat API calls).
+### Search Backends (Priority Order)
+
+| Backend | Setup | Features |
+|---------|-------|----------|
+| **Exa** | `EXA_API_KEY` | AI-native search, neural understanding, highlights |
+| **Tavily** | `TAVILY_API_KEY` | LLM-optimized results, content extraction |
+| **Google PSE** | `GOOGLE_PSE_API_KEY` + `GOOGLE_PSE_ENGINE_ID` | Traditional web search |
+| **OpenAI** | (fallback) | Uses `web_search_preview` tool |
+
+The system auto-detects the best available backend based on which API keys are configured.
 
 Enable via:
 - **UI**: Toggle "🌐 Web Search" in the sidebar
 - **Code**: `SemanticMemory(web_search=True)` or `chat_with_memory(..., web_search=True)`
 - **API**: `POST /chat` with `{"query": "...", "web_search": true}`
 
-When enabled, the model can search the web to answer questions about current events, recent data, or topics not in your semantic memory.
+## Web Fetch (Playwright)
+
+Sem-Mem uses **Playwright** for robust web content fetching with JavaScript rendering and parallel URL fetching.
+
+### Features
+
+- **JavaScript rendering** - Handles SPAs and dynamic content that simple HTTP requests miss
+- **Parallel fetching** - Fetches multiple URLs concurrently (up to 5 pages by default)
+- **Smart content extraction** - Waits for content to load, extracts main content, removes navigation/headers
+- **Automatic fallback** - Falls back to requests-based fetching if Playwright is unavailable
+
+### Installation
+
+```bash
+pip install playwright
+playwright install chromium
+```
+
+### Usage
+
+```python
+from sem_mem import SemanticMemory
+
+memory = SemanticMemory(api_key="...", web_search=True, web_fetch=True)
+
+# Combined search + fetch workflow (recommended)
+# 1. Searches via Exa/Tavily/Google PSE
+# 2. Fetches all result URLs in parallel via Playwright
+# 3. Returns formatted context with full page content
+context, logs = memory.search_and_fetch("Python asyncio best practices", num_results=5)
+
+# Direct parallel URL fetching
+results = memory.fetch_urls(["https://example1.com", "https://example2.com"])
+for content, success in results:
+    if success:
+        print(content)
+```
+
+### Modes
+
+**Passive Mode** (context injection):
+- Automatically detects URLs in user messages
+- Fetches up to 5 URLs in parallel
+- Content injected into context before LLM call
+
+**Active/Agentic Mode** (tool calling):
+- LLM can proactively request URL fetches via `web_fetch` tool
+- Useful for real-time data: stock prices, weather, news, documentation
+- Up to 3 tool call iterations to prevent infinite loops
+
+### Configuration
+
+```bash
+# Environment variables
+WEB_FETCH_USE_PLAYWRIGHT=true   # Use Playwright (default if installed)
+WEB_FETCH_USE_PLAYWRIGHT=false  # Force requests-based fetching
+```
+
+### Security
+
+- URL validation (http/https only)
+- Blocks localhost and private IPs
+- Configurable domain allowlist/blocklist
+- Content size limits (500KB default)
+- Request timeout (30s default)
 
 ## Chat Commands
 

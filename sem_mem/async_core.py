@@ -2,14 +2,93 @@
 Async version of SemanticMemory for use with FastAPI and other async frameworks.
 """
 
+import logging
 import os
 import json
 import asyncio
 import aiofiles
 import numpy as np
-from openai import AsyncOpenAI
-from typing import List, Dict, Optional, Tuple
+from openai import AsyncOpenAI, RateLimitError, APIError, APIConnectionError, APITimeoutError
+from typing import List, Dict, Optional, Tuple, TypeVar, Callable, Awaitable
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+async def async_retry_with_backoff(
+    func: Callable[[], Awaitable[T]],
+    max_retries: int = 3,
+    initial_delay: float = 1.0,
+    max_delay: float = 60.0,
+    backoff_factor: float = 2.0,
+    retryable_errors: tuple = (RateLimitError, APIConnectionError, APITimeoutError),
+) -> T:
+    """
+    Execute an async function with exponential backoff retry on specific errors.
+
+    Args:
+        func: Async function to execute
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay in seconds before first retry
+        max_delay: Maximum delay between retries
+        backoff_factor: Multiplier for delay after each retry
+        retryable_errors: Tuple of exception types to retry on
+
+    Returns:
+        Result of the function call
+
+    Raises:
+        The last exception if all retries are exhausted
+    """
+    delay = initial_delay
+    last_exception = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            return await func()
+        except retryable_errors as e:
+            last_exception = e
+            if attempt == max_retries:
+                logger.error(f"All {max_retries + 1} attempts failed: {e}")
+                raise
+
+            # Check for specific rate limit info in the error
+            retry_after = None
+            if hasattr(e, "response") and e.response is not None:
+                retry_after = e.response.headers.get("retry-after")
+                if retry_after:
+                    try:
+                        delay = min(float(retry_after), max_delay)
+                    except ValueError:
+                        pass
+
+            logger.warning(
+                f"Attempt {attempt + 1}/{max_retries + 1} failed with {type(e).__name__}: {e}. "
+                f"Retrying in {delay:.1f}s..."
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * backoff_factor, max_delay)
+        except APIError as e:
+            # For other API errors, check if it's a server error (5xx) worth retrying
+            if hasattr(e, "status_code") and e.status_code and 500 <= e.status_code < 600:
+                last_exception = e
+                if attempt == max_retries:
+                    logger.error(f"All {max_retries + 1} attempts failed: {e}")
+                    raise
+                logger.warning(
+                    f"Attempt {attempt + 1}/{max_retries + 1} failed with server error: {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * backoff_factor, max_delay)
+            else:
+                raise
+
+    raise last_exception
+
+
 from .core import SmartCache, get_memory_system_context
 from .thread_storage import ThreadStorage
 from .backup import MemoryBackup
@@ -235,25 +314,28 @@ class AsyncSemanticMemory:
         This improves recall by searching with multiple phrasings.
         """
         try:
-            response = await self.client.chat.completions.create(
-                model=QUERY_EXPANSION_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Generate 2-3 alternative phrasings of the user's question "
-                            "that would match stored facts. Focus on:\n"
-                            "- Converting questions to statements (e.g., 'Where do I live?' -> 'I live in')\n"
-                            "- Extracting key entities and topics\n"
-                            "- Using synonyms\n\n"
-                            "Return ONLY the alternative queries, one per line. No numbering or explanations."
-                        )
-                    },
-                    {"role": "user", "content": query}
-                ],
-                temperature=0.3,
-                max_tokens=100,
-            )
+            async def _call():
+                return await self.client.chat.completions.create(
+                    model=QUERY_EXPANSION_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Generate 2-3 alternative phrasings of the user's question "
+                                "that would match stored facts. Focus on:\n"
+                                "- Converting questions to statements (e.g., 'Where do I live?' -> 'I live in')\n"
+                                "- Extracting key entities and topics\n"
+                                "- Using synonyms\n\n"
+                                "Return ONLY the alternative queries, one per line. No numbering or explanations."
+                            )
+                        },
+                        {"role": "user", "content": query}
+                    ],
+                    temperature=0.3,
+                    max_tokens=100,
+                )
+
+            response = await async_retry_with_backoff(_call)
             content = response.choices[0].message.content or ""
             alternatives = content.strip().split("\n")
             alternatives = [q.strip() for q in alternatives if q.strip()]
@@ -262,12 +344,15 @@ class AsyncSemanticMemory:
             return [query]
 
     async def _get_embedding(self, text: str) -> np.ndarray:
-        """Get embedding with rate limiting."""
+        """Get embedding with rate limiting and retry on rate limit errors."""
         async with self._embedding_semaphore:
-            resp = await self.client.embeddings.create(
-                input=text,
-                model=self.embedding_model
-            )
+            async def _call():
+                return await self.client.embeddings.create(
+                    input=text,
+                    model=self.embedding_model
+                )
+
+            resp = await async_retry_with_backoff(_call)
             return np.array(resp.data[0].embedding)
 
     async def _get_embeddings_batch(self, texts: List[str]) -> List[np.ndarray]:
@@ -702,7 +787,10 @@ class AsyncSemanticMemory:
         else:
             create_params["temperature"] = 0.7
 
-        response = await self.client.responses.create(**create_params)  # type: ignore
+        async def _call():
+            return await self.client.responses.create(**create_params)  # type: ignore
+
+        response = await async_retry_with_backoff(_call)
 
         # Handle tool calls (agentic loop)
         # The model may request tool calls (e.g., web_fetch, file_read) which we execute
@@ -828,7 +916,10 @@ class AsyncSemanticMemory:
                 else:
                     submit_params["temperature"] = 0.7
 
-                response = await self.client.responses.create(**submit_params)
+                async def _submit_call():
+                    return await self.client.responses.create(**submit_params)
+
+                response = await async_retry_with_backoff(_submit_call)
 
         if iteration >= max_tool_iterations:
             logs.append(f"⚠️ Tool loop limit reached ({max_tool_iterations} iterations)")
