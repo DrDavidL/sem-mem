@@ -1,0 +1,27 @@
+{
+  "name": "sem-mem",
+  "version": "1.0.0",
+  "description": "> **Drop-in semantic memory for AI agents: local, HNSW-backed storage with auto-memory and RAG out of the box. Works with OpenAI, Claude, Gemini, Ollama, and more.**",
+  "main": "index.js",
+  "directories": {
+    "example": "examples",
+    "test": "tests"
+  },
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DrDavidL/sem-mem.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/DrDavidL/sem-mem/issues"
+  },
+  "homepage": "https://github.com/DrDavidL/sem-mem#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.57.0",
+    "@types/node": "^25.0.1"
+  }
+}
