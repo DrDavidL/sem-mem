@@ -22,8 +22,65 @@ These changes make Sem-Mem more inspectable, trustworthy, and production-friendl
 
 - **SmartCache (L1)**: Segmented LRU in RAM with Protected/Probation tiers
 - **L2 Storage**: HNSW index (`hnsw_index.bin` + `hnsw_metadata.json`) for O(log n) semantic search
+- **Embeddings**: Pluggable embedding providers (OpenAI, local via sentence-transformers, Ollama)
 - **Instructions**: Persistent system instructions in `local_memory/instructions.txt`
 - **UI**: Streamlit app (`app.py`)
+
+## Embedding Providers
+
+Sem-Mem supports multiple embedding providers. The recommended setup is local embeddings via sentence-transformers (no API costs, no rate limits).
+
+### Available Providers
+
+| Provider | Model | Dimension | API Key Required |
+|----------|-------|-----------|------------------|
+| `sentence-transformers` (recommended) | Qwen/Qwen3-Embedding-0.6B | 1024 | No |
+| `local` (alias) | Qwen/Qwen3-Embedding-0.6B | 1024 | No |
+| `openai` | text-embedding-3-small | 1536 | Yes |
+| `ollama` | nomic-embed-text | 768 | No |
+| `google` | text-embedding-004 | 768 | Yes |
+
+### Switching to Local Embeddings
+
+To switch from OpenAI to local embeddings (recommended to avoid rate limits):
+
+```bash
+# 1. Install sentence-transformers
+pip install sentence-transformers torch
+
+# 2. Run migration script (backs up existing index, re-embeds all memories)
+python scripts/migrate_embeddings.py --provider sentence-transformers
+
+# 3. Update your .env file
+SEMMEM_EMBEDDING_PROVIDER=sentence-transformers
+
+# 4. Restart your application
+```
+
+### Configuration
+
+Set embedding provider via environment variables:
+
+```bash
+# In .env file or environment
+SEMMEM_EMBEDDING_PROVIDER=sentence-transformers  # or: openai, local, ollama, google
+SEMMEM_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B  # optional, uses provider default
+
+# Chat still uses OpenAI (or other provider)
+SEMMEM_CHAT_PROVIDER=openai
+```
+
+Or programmatically:
+
+```python
+from sem_mem import SemanticMemory
+
+# Use local embeddings with OpenAI chat
+memory = SemanticMemory(
+    api_key="sk-...",  # For chat
+    embedding_provider="sentence-transformers",
+)
+```
 
 ## Key Files
 

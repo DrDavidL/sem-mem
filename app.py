@@ -33,6 +33,8 @@ from sem_mem.config import (
     CONVERSATION_SUMMARY_LEAVE_RECENT,
     CONVERSATION_SUMMARY_MAX_WINDOWS_PER_THREAD,
     ON_DELETE_THREAD_BEHAVIOR,
+    get_model_provider,
+    get_models_by_provider,
 )
 from sem_mem.thread_utils import (
     generate_thread_title,
@@ -259,7 +261,8 @@ def _maybe_summarize_thread(thread_data: dict, thread_name: str) -> bool:
     # Generate summary
     summary_text = summarize_conversation_window(
         window_messages,
-        client=agent.client,
+        chat_provider=agent.chat_provider,
+        model=agent.internal_operations_model,
     )
 
     if not summary_text:
@@ -347,7 +350,11 @@ def _handle_delete_thread(thread_name: str, save_summary: bool) -> bool:
     if save_summary:
         messages = thread_data.get("messages", [])
         if len(messages) >= 2:  # Only summarize non-trivial threads
-            summary = summarize_deleted_thread(messages, client=agent.client)
+            summary = summarize_deleted_thread(
+                messages,
+                chat_provider=agent.chat_provider,
+                model=agent.internal_operations_model,
+            )
             if summary:
                 _store_farewell_summary_in_memory(summary, thread_name, thread_data)
 
@@ -465,26 +472,26 @@ with st.sidebar:
             st.caption("This thread has content. Save a summary before deleting?")
             del_col1, del_col2 = st.columns(2)
             with del_col1:
-                if st.button("Delete & Save", type="primary", use_container_width=True):
+                if st.button("Delete & Save", type="primary", width="stretch"):
                     with st.spinner("Summarizing..."):
                         _handle_delete_thread(st.session_state.current_thread, save_summary=True)
                     st.toast("Thread deleted. Summary saved to memory.", icon="✅")
                     st.rerun()
             with del_col2:
-                if st.button("Just Delete", use_container_width=True):
+                if st.button("Just Delete", width="stretch"):
                     _handle_delete_thread(st.session_state.current_thread, save_summary=False)
                     st.toast("Thread deleted.", icon="🗑️")
                     st.rerun()
         elif ON_DELETE_THREAD_BEHAVIOR == "always_save" and has_messages:
             st.caption("A summary will be saved to memory before deletion.")
-            if st.button("Delete Thread", type="primary", use_container_width=True):
+            if st.button("Delete Thread", type="primary", width="stretch"):
                 with st.spinner("Summarizing and deleting..."):
                     _handle_delete_thread(st.session_state.current_thread, save_summary=True)
                 st.toast("Thread deleted. Summary saved to memory.", icon="✅")
                 st.rerun()
         else:
             # "never_save" or thread is too short to summarize
-            if st.button("Delete Thread", type="secondary", use_container_width=True):
+            if st.button("Delete Thread", type="secondary", width="stretch"):
                 _handle_delete_thread(st.session_state.current_thread, save_summary=False)
                 st.toast("Thread deleted.", icon="🗑️")
                 st.rerun()
@@ -510,21 +517,56 @@ with st.sidebar:
 
     st.divider()
 
-    # Model Selection
+    # Model Selection (provider-aware)
     st.header("🤖 Model")
-    model_options = list(CHAT_MODELS.keys())
+
+    # Get unique providers from CHAT_MODELS
+    providers = list(set(cfg.get("provider", "openai") for cfg in CHAT_MODELS.values()))
+    providers.sort()
+
+    # Initialize chat_provider in session state if not present
+    if "chat_provider" not in st.session_state:
+        st.session_state.chat_provider = get_model_provider(st.session_state.chat_model)
+
+    # Provider selection
+    selected_provider = st.selectbox(
+        "Provider",
+        providers,
+        index=providers.index(st.session_state.chat_provider) if st.session_state.chat_provider in providers else 0,
+        help="OpenAI (cloud) or Ollama (local)"
+    )
+    if selected_provider != st.session_state.chat_provider:
+        st.session_state.chat_provider = selected_provider
+        # Switch to first model of new provider
+        provider_models = get_models_by_provider(selected_provider)
+        if provider_models:
+            st.session_state.chat_model = provider_models[0]
+            agent.chat_model = provider_models[0]
+        st.rerun()
+
+    # Model selection (filtered by provider)
+    model_options = get_models_by_provider(selected_provider)
+    if not model_options:
+        model_options = list(CHAT_MODELS.keys())
+
+    # Ensure current model is in options
+    if st.session_state.chat_model not in model_options:
+        st.session_state.chat_model = model_options[0] if model_options else "gpt-5.1"
+        agent.chat_model = st.session_state.chat_model
+
     selected_model = st.selectbox(
         "Chat Model",
         model_options,
-        index=model_options.index(st.session_state.chat_model),
-        help="gpt-5.1 is a reasoning model (like o3)"
+        index=model_options.index(st.session_state.chat_model) if st.session_state.chat_model in model_options else 0,
+        help="gpt-5.1 is a reasoning model; gpt-oss:20b is a local 20B param model"
     )
     if selected_model != st.session_state.chat_model:
         st.session_state.chat_model = selected_model
         agent.chat_model = selected_model
 
     # Show reasoning effort only for reasoning models
-    if selected_model in ("gpt-5.1", "o1", "o3"):
+    model_config = CHAT_MODELS.get(selected_model, {})
+    if model_config.get("is_reasoning", False):
         selected_effort = st.select_slider(
             "Reasoning Effort",
             options=REASONING_EFFORTS,
@@ -796,7 +838,11 @@ with tab1:
 
         # Auto-rename thread if eligible (runs after any chat interaction)
         if _should_auto_rename(thread_data):
-            new_title = generate_thread_title(messages, client=agent.client)
+            new_title = generate_thread_title(
+                messages,
+                chat_provider=agent.chat_provider,
+                model=agent.internal_operations_model,
+            )
             if new_title:
                 thread_data["title"] = new_title.strip()
                 st.rerun()  # Refresh to show new title in sidebar
@@ -827,4 +873,4 @@ with tab2:
             hover_data=['text'], title="Memory Clusters (HNSW Index)",
             template="plotly_dark", size_max=15
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")

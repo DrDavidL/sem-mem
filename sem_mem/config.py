@@ -33,21 +33,57 @@ PROVIDER_API_KEY_ENV_VARS = {
     "google": "GOOGLE_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "ollama": None,  # Ollama doesn't require an API key
+    "sentence-transformers": None,  # Local model, no API key needed
+    "local": None,  # Alias for sentence-transformers
+    "qwen": None,  # Alias for sentence-transformers
     "polygon": "POLYGON_API_KEY",  # Stock market data
 }
 
+# Default models per embedding provider
+DEFAULT_EMBEDDING_MODELS = {
+    "openai": "text-embedding-3-small",
+    "azure": "text-embedding-3-small",
+    "google": "text-embedding-004",
+    "ollama": "nomic-embed-text",
+    "sentence-transformers": "Qwen/Qwen3-Embedding-0.6B",
+    "local": "Qwen/Qwen3-Embedding-0.6B",
+    "qwen": "Qwen/Qwen3-Embedding-0.6B",
+}
+
 # =============================================================================
-# Chat Models (OpenAI-specific, other providers have their own model handling)
+# Chat Models (multi-provider support)
 # =============================================================================
 
-# Available chat models
+# Available chat models (grouped by provider)
 CHAT_MODELS = {
+    # OpenAI models
     "gpt-5.1": {
+        "provider": "openai",
         "is_reasoning": True,
         "supports_temperature": False,
         "default_reasoning_effort": "low",
     },
     "gpt-4.1": {
+        "provider": "openai",
+        "is_reasoning": False,
+        "supports_temperature": True,
+        "default_reasoning_effort": None,
+    },
+    "gpt-4.1-mini": {
+        "provider": "openai",
+        "is_reasoning": False,
+        "supports_temperature": True,
+        "default_reasoning_effort": None,
+    },
+    # Ollama models (local)
+    "gpt-oss:20b": {
+        "provider": "ollama",
+        "is_reasoning": False,
+        "supports_temperature": True,
+        "default_reasoning_effort": None,
+    },
+    "llama3.2": {
+        "provider": "ollama",
         "is_reasoning": False,
         "supports_temperature": True,
         "default_reasoning_effort": None,
@@ -285,7 +321,9 @@ def get_config() -> dict:
 
     # Model configuration
     chat_model = os.getenv("SEMMEM_CHAT_MODEL", os.getenv("CHAT_MODEL", DEFAULT_CHAT_MODEL))
-    embedding_model = os.getenv("SEMMEM_EMBEDDING_MODEL", os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"))
+    # Get default embedding model based on provider
+    default_embedding_model = DEFAULT_EMBEDDING_MODELS.get(embedding_provider, "text-embedding-3-small")
+    embedding_model = os.getenv("SEMMEM_EMBEDDING_MODEL", os.getenv("EMBEDDING_MODEL", default_embedding_model))
     reasoning_effort = os.getenv("REASONING_EFFORT", "low")
 
     # Validate reasoning effort
@@ -356,10 +394,24 @@ def get_model_config(model: str) -> dict:
     return CHAT_MODELS.get(model, CHAT_MODELS[DEFAULT_CHAT_MODEL])
 
 
+def get_model_provider(model: str) -> str:
+    """Get the provider for a specific chat model."""
+    config = get_model_config(model)
+    return config.get("provider", "openai")
+
+
 def is_reasoning_model(model: str) -> bool:
     """Check if model is a reasoning model (like gpt-5.1, o3)."""
     config = get_model_config(model)
     return config.get("is_reasoning", False)
+
+
+def get_models_by_provider(provider: str) -> list:
+    """Get list of models for a specific provider."""
+    return [
+        model for model, config in CHAT_MODELS.items()
+        if config.get("provider") == provider
+    ]
 
 
 def validate_api_key(api_key: Optional[str]) -> bool:
