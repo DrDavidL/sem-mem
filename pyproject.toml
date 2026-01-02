@@ -64,6 +64,11 @@ anthropic = [
 google = [
     "google-generativeai>=0.8.0",
 ]
+# Local embedding models (no API key required)
+local = [
+    "sentence-transformers>=3.0.0",
+    "torch>=2.0.0",
+]
 # Note: azure uses openai SDK (already a core dependency)
 # Note: ollama uses requests (already widely available)
 # Note: openrouter uses openai SDK (already a core dependency)
@@ -71,6 +76,7 @@ all-providers = [
     "anthropic>=0.40.0",
     "google-generativeai>=0.8.0",
     "requests>=2.28.0",
+    "sentence-transformers>=3.0.0",
 ]
 # Everything
 all = [

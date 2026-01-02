@@ -66,6 +66,16 @@ def _init_providers():
     except ImportError:
         pass  # google-generativeai package not installed
 
+    # Import local embedding providers
+    try:
+        from .sentence_transformers import SentenceTransformerEmbeddingProvider
+        _EMBEDDING_PROVIDERS["sentence-transformers"] = SentenceTransformerEmbeddingProvider
+        # Aliases for convenience
+        _EMBEDDING_PROVIDERS["local"] = SentenceTransformerEmbeddingProvider
+        _EMBEDDING_PROVIDERS["qwen"] = SentenceTransformerEmbeddingProvider
+    except ImportError:
+        pass  # sentence-transformers package not installed
+
     # Import Tier 3 providers (experimental)
     try:
         from .openrouter import OpenRouterChatProvider

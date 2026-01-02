@@ -13,6 +13,7 @@ from .config import (
     DEFAULT_EMBEDDING_PROVIDER,
     get_api_key,
     get_provider_kwargs,
+    get_model_provider,
     # Outcome-based learning
     OUTCOME_LEARNING_ENABLED,
     OUTCOME_EWMA_ALPHA,
@@ -336,8 +337,8 @@ class SemanticMemory:
         cache_size: int = 20,
         embedding_model: Optional[str] = None,
         embedding_dim: Optional[int] = None,
-        chat_model: str = "gpt-5.1",
-        reasoning_effort: str = "low",
+        chat_model: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         auto_memory: bool = True,
         auto_memory_threshold: float = 0.5,
         include_memory_context: bool = True,
@@ -407,8 +408,11 @@ class SemanticMemory:
         # Store other settings
         self.storage_dir = storage_dir
         self.instructions_file = os.path.join(storage_dir, "instructions.txt")
-        self.chat_model = chat_model
-        self.reasoning_effort = reasoning_effort
+        # Resolve chat model and reasoning effort from env if not specified
+        self._chat_model = chat_model or os.getenv("SEMMEM_CHAT_MODEL", "gpt-5.1")
+        self.reasoning_effort = reasoning_effort or os.getenv("REASONING_EFFORT", "low")
+        # Store provider kwargs for potential re-initialization
+        self._all_provider_kwargs = all_provider_kwargs
         self.auto_memory_enabled = auto_memory
         self.auto_memory_threshold = auto_memory_threshold
         self.include_memory_context = include_memory_context
@@ -475,6 +479,64 @@ class SemanticMemory:
             f"Provider '{self._chat_provider_name}' does not expose a client attribute. "
             f"Use the provider abstraction methods instead."
         )
+
+    @property
+    def chat_provider(self) -> BaseChatProvider:
+        """
+        Access to the chat provider for internal operations.
+
+        Use this for operations like title generation, summarization, etc.
+        that need to call the LLM but shouldn't go through chat_with_memory.
+        """
+        return self._chat_provider
+
+    @property
+    def chat_provider_name(self) -> str:
+        """Get the name of the current chat provider (e.g., 'openai', 'ollama')."""
+        return self._chat_provider_name
+
+    @property
+    def internal_operations_model(self) -> str:
+        """
+        Get the appropriate model for internal operations (title gen, summarization).
+
+        When using OpenAI provider, uses gpt-4.1-mini.
+        When using Ollama provider, uses the current chat model (avoids cross-provider calls).
+        """
+        if self._chat_provider_name == "ollama":
+            # Use current model for Ollama (avoids needing OpenAI key)
+            return self._chat_model
+        # Default to gpt-4.1-mini for OpenAI and other providers
+        return "gpt-4.1-mini"
+
+    @property
+    def chat_model(self) -> str:
+        """Get the current chat model."""
+        return self._chat_model
+
+    @chat_model.setter
+    def chat_model(self, value: str):
+        """
+        Set the chat model, switching providers if necessary.
+
+        When switching to a model from a different provider (e.g., from OpenAI's
+        gpt-5.1 to Ollama's gpt-oss:20b), this will automatically reinitialize
+        the chat provider.
+        """
+        new_provider = get_model_provider(value)
+        current_provider = self._chat_provider_name
+
+        if new_provider != current_provider:
+            # Need to switch providers
+            new_api_key = get_api_key(provider=new_provider)
+            self._chat_provider = get_chat_provider(
+                new_provider,
+                api_key=new_api_key,
+                **self._all_provider_kwargs,
+            )
+            self._chat_provider_name = new_provider
+
+        self._chat_model = value
 
     @property
     def auto_memory(self):

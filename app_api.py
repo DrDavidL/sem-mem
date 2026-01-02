@@ -334,25 +334,25 @@ with st.sidebar:
             st.caption("This thread has content. Save a summary before deleting?")
             del_col1, del_col2 = st.columns(2)
             with del_col1:
-                if st.button("Delete & Save", type="primary", use_container_width=True):
+                if st.button("Delete & Save", type="primary", width="stretch"):
                     with st.spinner("Summarizing..."):
                         _handle_delete_thread(st.session_state.current_thread, save_summary=True)
                     st.toast("Thread deleted. Summary saved to memory.", icon="✅")
                     st.rerun()
             with del_col2:
-                if st.button("Just Delete", use_container_width=True):
+                if st.button("Just Delete", width="stretch"):
                     _handle_delete_thread(st.session_state.current_thread, save_summary=False)
                     st.toast("Thread deleted.", icon="🗑️")
                     st.rerun()
         elif ON_DELETE_THREAD_BEHAVIOR == "always_save" and has_messages:
             st.caption("A summary will be saved to memory before deletion.")
-            if st.button("Delete Thread", type="primary", use_container_width=True):
+            if st.button("Delete Thread", type="primary", width="stretch"):
                 with st.spinner("Summarizing and deleting..."):
                     _handle_delete_thread(st.session_state.current_thread, save_summary=True)
                 st.toast("Thread deleted. Summary saved to memory.", icon="✅")
                 st.rerun()
         else:
-            if st.button("Delete Thread", type="secondary", use_container_width=True):
+            if st.button("Delete Thread", type="secondary", width="stretch"):
                 _handle_delete_thread(st.session_state.current_thread, save_summary=False)
                 st.toast("Thread deleted.", icon="🗑️")
                 st.rerun()
@@ -387,14 +387,20 @@ with st.sidebar:
     if model_config:
         available_models = model_config.get("available_models", ["gpt-5.1", "gpt-4.1"])
         current_model = model_config.get("current_model", "gpt-5.1")
+        current_provider = model_config.get("current_provider", "openai")
         reasoning_efforts = model_config.get("reasoning_efforts", ["low", "medium", "high"])
         current_reasoning = model_config.get("current_reasoning_effort", "low")
+        is_reasoning = model_config.get("is_reasoning_model", False)
+
+        # Show current provider as info
+        provider_label = "☁️ OpenAI" if current_provider == "openai" else "🏠 Ollama (local)"
+        st.caption(f"Provider: {provider_label}")
 
         selected_model = st.selectbox(
             "Chat Model",
             available_models,
             index=available_models.index(current_model) if current_model in available_models else 0,
-            help="gpt-5.1 is a reasoning model (like o3)"
+            help="gpt-5.1 is a reasoning model; gpt-oss:20b is a local 20B param model"
         )
 
         # Update model if changed
@@ -403,7 +409,7 @@ with st.sidebar:
             st.rerun()
 
         # Show reasoning effort only for reasoning models
-        if selected_model in ("gpt-5.1", "o1", "o3"):
+        if is_reasoning:
             selected_effort = st.select_slider(
                 "Reasoning Effort",
                 options=reasoning_efforts,

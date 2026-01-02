@@ -101,6 +101,8 @@ from .config import (
     PATTERN_MIN_UTILITY,
     OUTCOME_VALUES,
     get_api_key,
+    get_provider_kwargs,
+    get_model_provider,
     DEFAULT_CHAT_PROVIDER,
 )
 from .vector_index import HNSWIndex
@@ -153,13 +155,14 @@ class AsyncSemanticMemory:
     ):
         # Resolve API key
         resolved_api_key = api_key or get_api_key(provider=DEFAULT_CHAT_PROVIDER)
+        self._resolved_api_key = resolved_api_key
 
         self.client = AsyncOpenAI(api_key=resolved_api_key)
         self.storage_dir = storage_dir
         self.instructions_file = os.path.join(storage_dir, "instructions.txt")
         self.embedding_model = embedding_model
         self.embedding_dim = embedding_dim
-        self.chat_model = chat_model
+        self._chat_model = chat_model
         self.reasoning_effort = reasoning_effort
         self.auto_memory_enabled = auto_memory
         self.auto_memory_threshold = auto_memory_threshold
@@ -174,11 +177,18 @@ class AsyncSemanticMemory:
         # Web fetcher for URL content extraction
         self._web_fetcher = WebFetcher()
 
-        # Initialize sync chat provider for consolidator and other sync operations
+        # Store provider kwargs for potential re-initialization
+        self._all_provider_kwargs = get_provider_kwargs()
+
+        # Initialize sync chat provider based on model's provider
+        chat_provider_name = get_model_provider(chat_model)
+        chat_api_key = get_api_key(provider=chat_provider_name) or resolved_api_key
         self._chat_provider = get_chat_provider(
-            DEFAULT_CHAT_PROVIDER,
-            api_key=resolved_api_key,
+            chat_provider_name,
+            api_key=chat_api_key,
+            **self._all_provider_kwargs,
         )
+        self._chat_provider_name = chat_provider_name
 
         # Semaphore to limit concurrent API calls
         self._embedding_semaphore = asyncio.Semaphore(max_concurrent_embeddings)
@@ -209,6 +219,64 @@ class AsyncSemanticMemory:
         # Ensure storage directory exists (sync is fine for init)
         if not os.path.exists(storage_dir):
             os.makedirs(storage_dir)
+
+    @property
+    def chat_provider(self):
+        """
+        Access to the chat provider for internal operations.
+
+        Use this for operations like title generation, summarization, etc.
+        that need to call the LLM but shouldn't go through chat_with_memory.
+        """
+        return self._chat_provider
+
+    @property
+    def chat_provider_name(self) -> str:
+        """Get the name of the current chat provider (e.g., 'openai', 'ollama')."""
+        return self._chat_provider_name
+
+    @property
+    def internal_operations_model(self) -> str:
+        """
+        Get the appropriate model for internal operations (title gen, summarization).
+
+        When using OpenAI provider, uses gpt-4.1-mini.
+        When using Ollama provider, uses the current chat model (avoids cross-provider calls).
+        """
+        if self._chat_provider_name == "ollama":
+            # Use current model for Ollama (avoids needing OpenAI key)
+            return self._chat_model
+        # Default to gpt-4.1-mini for OpenAI and other providers
+        return "gpt-4.1-mini"
+
+    @property
+    def chat_model(self) -> str:
+        """Get the current chat model."""
+        return self._chat_model
+
+    @chat_model.setter
+    def chat_model(self, value: str):
+        """
+        Set the chat model, switching providers if necessary.
+
+        When switching to a model from a different provider (e.g., from OpenAI's
+        gpt-5.1 to Ollama's gpt-oss:20b), this will automatically reinitialize
+        the chat provider.
+        """
+        new_provider = get_model_provider(value)
+        current_provider = self._chat_provider_name
+
+        if new_provider != current_provider:
+            # Need to switch providers
+            new_api_key = get_api_key(provider=new_provider) or self._resolved_api_key
+            self._chat_provider = get_chat_provider(
+                new_provider,
+                api_key=new_api_key,
+                **self._all_provider_kwargs,
+            )
+            self._chat_provider_name = new_provider
+
+        self._chat_model = value
 
     @property
     def auto_memory(self):

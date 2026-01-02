@@ -22,7 +22,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sem_mem.async_core import AsyncSemanticMemory
-from sem_mem.config import get_api_key, get_config, CHAT_MODELS, REASONING_EFFORTS, DEFAULT_CHAT_MODEL
+from sem_mem.config import get_api_key, get_config, CHAT_MODELS, REASONING_EFFORTS, DEFAULT_CHAT_MODEL, get_model_provider
 from sem_mem.api.files import router as files_router
 from sem_mem.api.backup import backup_router, threads_router, get_memory as backup_get_memory
 from sem_mem.progress import ProgressLog
@@ -85,6 +85,7 @@ class MemoryStats(BaseModel):
 class ModelConfig(BaseModel):
     available_models: List[str]
     current_model: str
+    current_provider: str
     reasoning_efforts: List[str]
     current_reasoning_effort: str
     is_reasoning_model: bool
@@ -292,14 +293,16 @@ async def get_stats(mem: AsyncSemanticMemory = Depends(get_memory)):
 
 
 @app.get("/model", response_model=ModelConfig)
-async def get_model_config(mem: AsyncSemanticMemory = Depends(get_memory)):
+async def get_model_config_endpoint(mem: AsyncSemanticMemory = Depends(get_memory)):
     """Get current model configuration."""
+    model_cfg = CHAT_MODELS.get(mem.chat_model, {})
     return ModelConfig(
         available_models=list(CHAT_MODELS.keys()),
         current_model=mem.chat_model,
+        current_provider=get_model_provider(mem.chat_model),
         reasoning_efforts=REASONING_EFFORTS,
         current_reasoning_effort=mem.reasoning_effort,
-        is_reasoning_model=mem.chat_model in ("gpt-5.1", "o1", "o3"),
+        is_reasoning_model=model_cfg.get("is_reasoning", False),
     )
 
 
@@ -325,10 +328,12 @@ async def set_model(
     if reasoning_effort:
         mem.reasoning_effort = reasoning_effort
 
+    model_cfg = CHAT_MODELS.get(model, {})
     return {
         "model": mem.chat_model,
+        "provider": get_model_provider(model),
         "reasoning_effort": mem.reasoning_effort,
-        "is_reasoning_model": model in ("gpt-5.1", "o1", "o3"),
+        "is_reasoning_model": model_cfg.get("is_reasoning", False),
     }
 
 
