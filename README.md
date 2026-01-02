@@ -204,15 +204,20 @@ pip install -e ".[all]"
 
 ### Package Installation
 
+> **Note:** Sem-Mem is not yet published to PyPI. Install directly from GitHub:
+
 ```bash
 # Core package only
-pip install sem-mem
+pip install git+https://github.com/DrDavidL/sem-mem.git
 
 # With Streamlit app
-pip install "sem-mem[app]"
+pip install "git+https://github.com/DrDavidL/sem-mem.git[app]"
 
 # With FastAPI server
-pip install "sem-mem[server]"
+pip install "git+https://github.com/DrDavidL/sem-mem.git[server]"
+
+# Everything (app + server + dev tools)
+pip install "git+https://github.com/DrDavidL/sem-mem.git[all]"
 ```
 
 ## Configuration
@@ -305,12 +310,12 @@ memory = SemanticMemory(
 
 ```bash
 # Core (OpenAI + Azure)
-pip install sem-mem
+pip install git+https://github.com/DrDavidL/sem-mem.git
 
 # With specific providers
-pip install "sem-mem[anthropic]"   # Anthropic/Claude
-pip install "sem-mem[google]"      # Google/Gemini
-pip install "sem-mem[all-providers]"  # All providers
+pip install "git+https://github.com/DrDavidL/sem-mem.git[anthropic]"   # Anthropic/Claude
+pip install "git+https://github.com/DrDavidL/sem-mem.git[google]"      # Google/Gemini
+pip install "git+https://github.com/DrDavidL/sem-mem.git[all-providers]"  # All providers
 ```
 
 ### Embedding Provider Lock
