@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
-    { name = "David" }
+    { name = "David Liebovitz", email = "codeaccelerate@outlook.com" }
 ]
 keywords = ["ai", "memory", "rag", "semantic-search", "chatbot", "openai"]
 classifiers = [
@@ -32,10 +32,13 @@ dependencies = [
     "hnswlib>=0.8.0",
     "requests>=2.31.0",  # For web search and fetch
     "beautifulsoup4>=4.12.0",  # For web fetch HTML parsing
-    "playwright>=1.40.0",  # For Playwright-based web fetching
 ]
 
 [project.optional-dependencies]
+# Web fetching with Playwright (optional, ~100MB+ download)
+web-fetch = [
+    "playwright>=1.40.0",
+]
 # Streamlit app dependencies
 app = [
     "streamlit>=1.30.0",
@@ -80,15 +83,31 @@ all-providers = [
 ]
 # Everything
 all = [
-    "sem-mem[app,server,dev,all-providers]",
+    "sem-mem[app,server,dev,all-providers,web-fetch]",
 ]
 
 [project.urls]
-Homepage = "https://github.com/david/sem-mem"
-Repository = "https://github.com/david/sem-mem"
+Homepage = "https://github.com/DrDavidL/sem-mem"
+Repository = "https://github.com/DrDavidL/sem-mem"
+Documentation = "https://github.com/DrDavidL/sem-mem#readme"
+"Bug Tracker" = "https://github.com/DrDavidL/sem-mem/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sem_mem"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.github",
+    "/local_memory",
+    "/.env",
+    "/.env.example",
+    "/.streamlit",
+    "/tests",
+    "*.pyc",
+    "/__pycache__",
+    "/.pytest_cache",
+    "/.ruff_cache",
+]
 
 [tool.ruff]
 line-length = 100
